@@ -1,0 +1,1817 @@
+#!/usr/bin/env bash
+
+# ============================================================================
+# MODALITÀ DI ESECUZIONE SICURA
+# ----------------------------------------------------------------------------
+# set -e        -> termina se un comando fallisce
+# set -u        -> errore se usi variabili non definite
+# set -o pipefail -> se un comando in una pipeline fallisce, fallisce tutta
+#
+# Nota:
+# questo rende lo script più robusto, ma richiede di gestire esplicitamente
+# i casi in cui un comando può fallire "in modo previsto".
+# ============================================================================
+set -euo pipefail
+
+
+# ============================================================================
+# DEFAULTS / CONFIGURAZIONE INIZIALE
+# ----------------------------------------------------------------------------
+# Questi sono i valori di default usati se l'utente non passa opzioni.
+# ============================================================================
+MODEL="gpt-5.4"
+TEMPERATURE="1.0"
+SYSTEM_PROMPT=""
+INPUT_FILE=""
+OUTPUT_FILE=""
+RAW=0
+INTERACTIVE=0
+USE_STDIN=0
+MAX_OUTPUT_TOKENS=""
+EFFORT=""
+VERBOSITY=""
+SAVE_RAW_FILE=""
+SAVE_HEADERS_FILE=""
+SAVE_STATUS_FILE=""
+
+# IMPORTANTE:
+# RESUME resta volutamente disattivato di default, come richiesto.
+# Quindi lo script NON riusa automaticamente previous_response_id,
+# a meno che l'utente non passi esplicitamente --resume.
+RESUME=0
+
+# ----------------------------------------------------------------------------
+# NUOVA VARIABILE: FORCE_NEW
+# ----------------------------------------------------------------------------
+# Serve per implementare meglio --new.
+#
+# Prima:
+#   --new cancellava lo stato e usciva subito.
+#
+# Adesso:
+#   --new significa "azzera lo stato precedente e continua la richiesta
+#   corrente come nuova conversazione".
+#
+# In pratica:
+# - cancella il previous_response_id salvato su file
+# - impedisce alla richiesta corrente di usare contesto precedente
+# - poi lascia proseguire il normale flusso
+# ----------------------------------------------------------------------------
+FORCE_NEW=0
+
+POSITIONAL=()
+
+# ----------------------------------------------------------------------------
+# Variabili legate alla gestione file OpenAI
+# ----------------------------------------------------------------------------
+UPLOAD_FILE=""
+ATTACHED_FILE_ID=""
+USE_FILE_ALIAS=""
+SAVE_FILE_SPEC=""
+REMOVE_FILE_ALIAS=""
+SHOW_SAVED_FILES=0
+CHECK_FILE_ID=""
+
+# ----------------------------------------------------------------------------
+# Variabili per logging / messaggi di stato
+# ----------------------------------------------------------------------------
+VERBOSE=1
+SHOW_TIMESTAMPS=1
+
+# ----------------------------------------------------------------------------
+# NUOVA VARIABILE GLOBALE: LAST_HTTP_STATUS
+# ----------------------------------------------------------------------------
+# Le funzioni bash restituiscono facilmente una sola "stringa" via stdout.
+# Per questo motivo, quando facciamo chiamate HTTP:
+# - il body della risposta viene restituito via stdout
+# - lo status HTTP (200, 404, 500, ecc.) viene salvato qui
+#
+# In questo modo possiamo controllare:
+# - errori di rete / curl
+# - errori HTTP
+# - errori applicativi restituiti come JSON con campo .error
+# ----------------------------------------------------------------------------
+LAST_HTTP_STATUS=""
+
+LAST_HTTP_HEADERS=""
+
+
+# ============================================================================
+# PATHS / STATO LOCALE
+# ----------------------------------------------------------------------------
+# Lo script salva i propri file locali qui:
+#   ~/.local/share/chatgpt
+#
+# history.log      -> cronologia locale dei prompt
+# last_response_id -> ultimo response_id ricevuto
+# files.json       -> alias locali -> file_id OpenAI
+# ============================================================================
+CHATGPT_HOME="${HOME}/.local/share/chatgpt"
+HISTORY_FILE="${CHATGPT_HOME}/history.log"
+STATE_FILE="${CHATGPT_HOME}/last_response_id"
+FILE_MAP="${CHATGPT_HOME}/files.json"
+
+mkdir -p "$CHATGPT_HOME"
+[ -f "$FILE_MAP" ] || echo '{}' > "$FILE_MAP"
+
+
+# ============================================================================
+# HELP BREVE
+# ============================================================================
+usage() {
+  cat <<'EOF'
+Uso:
+  chatgpt [opzioni] "prompt"
+  chatgpt -f file.txt [opzioni]
+  cat file.txt | chatgpt --stdin [opzioni]
+  chatgpt -i [opzioni]
+
+Descrizione:
+  CLI per OpenAI Responses API con supporto file_id riutilizzabili.
+
+Opzioni principali:
+  -m MODEL              Modello da usare (default: gpt-5.4)
+  -t TEMP               Temperatura (default: 1.0)
+  -s SYSTEM             Instructions / system prompt
+  -f FILE               Legge il prompt da file
+  -o FILE               Salva il testo di output su file
+  -k TOKENS             Max output tokens
+  -r                    Stampa il JSON completo invece del solo testo
+  -i                    Modalità interattiva
+
+Opzioni avanzate:
+  --stdin               Legge l'input da STDIN / pipe
+  --effort LEVEL        minimal | low | medium | high
+  --verbosity LEVEL     low | medium | high
+  --resume              Riusa previous_response_id salvato localmente
+  --no-resume           Non riusa previous_response_id (default)
+  --new                 Azzera lo stato salvato e invia la richiesta come nuova conversazione
+  --history             Mostra gli ultimi prompt salvati
+  --state               Mostra il previous_response_id corrente
+  --clear-history       Cancella la history locale
+  --clear-state         Cancella il previous_response_id locale
+  --quiet               Disattiva i messaggi di stato
+  --no-timestamps       Disattiva gli orari nei messaggi di stato
+  --save-raw FILE       Salva il body JSON grezzo della risposta API
+  --save-headers FILE   Salva gli header HTTP dell’ultima risposta
+  --save-status FILE    Salva solo lo status HTTP dell’ultima risposta
+
+File upload / reuse:
+  --upload-file PATH        Carica un file su OpenAI e stampa il JSON di risposta
+  --file-id ID              Usa un file già caricato nella richiesta corrente
+  --save-file-id NOME=ID    Salva un alias locale per un file_id
+  --use-file NOME           Usa un alias locale salvato
+  --list-saved-files        Elenca gli alias locali salvati
+  --remove-saved-file NOME  Elimina un alias locale
+  --check-file ID           Verifica lato API se un file_id esiste ancora
+
+Documentazione:
+  --manual              Mostra il manuale completo
+
+Help:
+  -h, --help            Mostra questo help
+
+Esempi:
+  chatgpt "Che giorno è oggi?"
+  chatgpt -t 0.2 -k 200 "Spiega il bruxismo in 5 righe"
+  chatgpt -s "Rispondi in markdown, stile clinico" "Artralgia ATM"
+  chatgpt -f input.txt -o output.md
+  cat appunti.txt | chatgpt --stdin -s "Riassumi in punti"
+  chatgpt -i -s "Rispondi sempre in italiano"
+  chatgpt --resume "Continua la conversazione precedente"
+  chatgpt --new "Riparti da zero senza usare il contesto salvato"
+  chatgpt --manual
+EOF
+  exit 0
+}
+
+
+# ============================================================================
+# MANUALE ESTESO
+# ============================================================================
+manual() {
+  cat <<'EOF'
+CHATGPT CLI MANUALE
+===================
+
+Panoramica
+----------
+Questo script è un client da terminale per la OpenAI Responses API.
+
+Permette di:
+- inviare prompt semplici
+- usare instructions / system prompt
+- leggere input da file o da pipe
+- salvare l'output su file
+- usare modalità interattiva
+- riusare opzionalmente il contesto conversazionale
+- caricare file una volta e riusarli tramite file_id
+- salvare alias locali per file_id
+
+Comando base
+------------
+  chatgpt "Che giorno è oggi?"
+
+Esempio:
+  chatgpt "Spiega il bruxismo in 5 righe"
+
+--------------------------------------------------
+SEZIONE 1 — PROMPT SEMPLICI
+--------------------------------------------------
+
+Invio diretto:
+  chatgpt "Riassumi questo concetto"
+
+Con temperatura:
+  chatgpt -t 0.2 "Spiega il bruxismo in modo sintetico"
+
+Con limite output:
+  chatgpt -k 200 "Spiega il DC-TMD in breve"
+
+Con modello specifico:
+  chatgpt -m gpt-5.4 "Che giorno è oggi?"
+
+Note:
+- temperatura bassa = più deterministico
+- temperatura alta = più creativo/variabile
+- max output tokens limita la lunghezza della risposta
+
+--------------------------------------------------
+SEZIONE 2 — INSTRUCTIONS / SYSTEM PROMPT
+--------------------------------------------------
+
+Le instructions definiscono come il modello deve comportarsi.
+Sono separate dal prompt utente.
+
+Esempio:
+  chatgpt -s "Rispondi in markdown, tono clinico, sintetico" \
+    "Criteri diagnostici dell'artralgia ATM"
+
+Uso tipico:
+- lingua
+- stile
+- formato
+- vincoli
+- persona/ruolo
+- istruzioni costanti
+
+Non usarle per il contenuto specifico della domanda, che va nel prompt.
+
+--------------------------------------------------
+SEZIONE 3 — INPUT DA FILE
+--------------------------------------------------
+
+Leggere il prompt da file:
+  chatgpt -f input.txt
+
+Con output su file:
+  chatgpt -f input.txt -o output.md
+
+Esempio:
+  chatgpt -s "Riassumi in punti" -f appunti.txt -o sintesi.md
+
+Uso ideale:
+- prompt lunghi
+- testi da analizzare
+- note / trascrizioni / markdown
+
+--------------------------------------------------
+SEZIONE 4 — INPUT DA PIPE / STDIN
+--------------------------------------------------
+
+Puoi passare input via pipe:
+
+  cat appunti.txt | chatgpt --stdin
+  pbpaste | chatgpt --stdin
+  cat file.md | chatgpt --stdin -s "Riassumi in elenco"
+
+Attenzione:
+- --stdin non è compatibile con -i
+- --stdin non è compatibile con -f
+
+--------------------------------------------------
+SEZIONE 5 — OUTPUT
+--------------------------------------------------
+
+Output normale:
+  stampa solo il testo finale del modello
+
+Output raw JSON:
+  chatgpt -r "Che giorno è oggi?"
+
+Salvare su file:
+  chatgpt "Fammi un riassunto" -o output.txt
+
+Salvare il JSON grezzo:
+  chatgpt --save-raw resp.json "Spiega il bruxismo"
+
+Salvare JSON grezzo e testo pulito:
+  chatgpt --save-raw resp.json -o out.txt "Spiega il bruxismo"
+
+Mostrare testo a schermo ma tenere anche il JSON:
+  chatgpt --save-raw resp.json "Prompt..."
+
+Nota:
+- con -r ottieni il JSON completo della risposta API
+- con -o salvi solo il testo estratto, non il JSON raw
+
+--------------------------------------------------
+SEZIONE 6 — MODALITÀ INTERATTIVA
+--------------------------------------------------
+
+Avvio:
+  chatgpt -i
+
+Con instructions:
+  chatgpt -i -s "Rispondi sempre in italiano, tono tecnico"
+
+Comandi disponibili:
+  /exit      esce
+  /new       nuova conversazione
+  /history   mostra gli ultimi prompt
+  /state     mostra il previous_response_id corrente in memoria
+  /help      mostra i comandi interattivi
+
+Uso tipico:
+- brainstorming
+- follow-up sullo stesso tema
+- dialoghi consecutivi con contesto persistente nella sessione corrente
+
+Nota importante:
+- anche senza --resume, nella modalità interattiva i messaggi della stessa
+  sessione vengono concatenati tra loro normalmente
+- --resume serve solo se vuoi partire, all'avvio, da un previous_response_id
+  già salvato su disco da una sessione precedente
+
+--------------------------------------------------
+SEZIONE 7 — CONTESTO PERSISTENTE
+--------------------------------------------------
+
+Lo script salva localmente l'ultimo response_id e può riusarlo come
+previous_response_id per mantenere il contesto.
+
+Default:
+  --no-resume attivo
+
+Quindi, per default:
+- lo script NON riusa automaticamente il contesto precedente
+- però continua comunque a salvare l'ultimo response_id ricevuto
+
+Questo significa che puoi decidere dopo di riattivarlo, ad esempio con:
+
+  chatgpt --resume "Continua la conversazione precedente"
+
+Per ignorare il contesto precedente:
+  chatgpt --no-resume "Rispondi da zero"
+
+Per cancellare il contesto salvato:
+  chatgpt --clear-state
+
+Per vedere il response_id corrente:
+  chatgpt --state
+
+Per partire da zero nella richiesta corrente:
+  chatgpt --new "Riparti da capo"
+
+Differenza importante:
+- --clear-state = cancella lo stato e termina
+- --new         = cancella lo stato MA continua la richiesta corrente come
+                  nuova conversazione
+
+--------------------------------------------------
+SEZIONE 8 — HISTORY LOCALE
+--------------------------------------------------
+
+Lo script salva i prompt in:
+  ~/.local/share/chatgpt/history.log
+
+Mostrare gli ultimi prompt:
+  chatgpt --history
+
+Cancellare la history:
+  chatgpt --clear-history
+
+Uso tipico:
+- recuperare prompt vecchi
+- audit rapido dei test fatti
+- riutilizzare prompt utili
+
+--------------------------------------------------
+SEZIONE 9 — FILE UPLOAD E ANALISI DOCUMENTI
+--------------------------------------------------
+
+Puoi caricare un file una volta e poi riusarlo tramite file_id.
+
+Upload:
+  chatgpt --upload-file documento.pdf
+
+Questo restituisce JSON con un campo id, ad esempio:
+  file-abc123
+
+Usare direttamente un file_id:
+  chatgpt --file-id file-abc123 "Riassumi questo documento"
+
+Salvare un alias locale:
+  chatgpt --save-file-id bruxismo=file-abc123
+
+Usare l'alias:
+  chatgpt --use-file bruxismo "Riassumi il documento"
+
+Elencare alias salvati:
+  chatgpt --list-saved-files
+
+Rimuovere alias:
+  chatgpt --remove-saved-file bruxismo
+
+Controllare se un file esiste ancora lato API:
+  chatgpt --check-file file-abc123
+
+Uso consigliato:
+- carica una volta
+- salva alias locale
+- riusa l'alias nelle richieste successive
+
+--------------------------------------------------
+SEZIONE 10 — PDF vs DOCX
+--------------------------------------------------
+
+Regola pratica:
+- PDF: meglio per layout, tabelle, immagini, slide, grafici
+- DOCX: bene se ti interessa soprattutto il testo
+
+Se il file contiene contenuto visivo importante, meglio PDF.
+
+--------------------------------------------------
+SEZIONE 11 — EFFORT E VERBOSITY
+--------------------------------------------------
+
+Reasoning effort:
+  --effort minimal
+  --effort low
+  --effort medium
+  --effort high
+
+Verbosity:
+  --verbosity low
+  --verbosity medium
+  --verbosity high
+
+Esempio:
+  chatgpt --effort medium --verbosity low "Fammi una sintesi tecnica"
+
+Uso pratico:
+- effort più alto = più ragionamento
+- verbosity più alta = risposta più estesa
+
+--------------------------------------------------
+SEZIONE 12 — ESEMPI PRONTI
+--------------------------------------------------
+
+1) Domanda semplice
+  chatgpt "Che giorno è oggi?"
+
+2) Riassunto clinico sintetico
+  chatgpt -t 0.2 -k 250 \
+    -s "Rispondi in italiano, tono clinico, sintetico" \
+    "Criteri per artralgia ATM"
+
+3) Analizzare testo da file
+  chatgpt -f appunti.txt -o sintesi.md \
+    -s "Riassumi in markdown con punti elenco"
+
+4) Usare pipe
+  pbpaste | chatgpt --stdin -s "Correggi e ripulisci il testo"
+
+5) Modalità interattiva
+  chatgpt -i -s "Rispondi in modo tecnico"
+
+6) Riprendere una conversazione precedente
+  chatgpt --resume "Continua da dove eravamo rimasti"
+
+7) Ripartire da zero nella richiesta corrente
+  chatgpt --new "Ignora il contesto precedente e ricomincia"
+
+8) Upload documento e riuso
+  chatgpt --upload-file Bruxismo.pdf
+  chatgpt --save-file-id bruxismo=file-abc123
+  chatgpt --use-file bruxismo "Riassumi il documento"
+  chatgpt --use-file bruxismo "Ora estrai solo le definizioni"
+
+--------------------------------------------------
+SEZIONE 13 — ERRORI COMUNI
+--------------------------------------------------
+
+1) OPENAI_API_KEY non impostata
+  Fix:
+    export OPENAI_API_KEY="sk-..."
+    source ~/.zshrc
+
+2) curl non installato
+  Fix:
+    installa curl e verifica:
+      command -v curl
+
+3) jq non installato
+  Fix:
+    installa jq e verifica:
+      command -v jq
+
+4) temperatura non valida
+  Fix:
+    usa valori tipo 0.2, 0.7, 1.0
+
+5) max output tokens non valido
+  Fix:
+    usa valori tipo 100, 300, 800
+
+6) file non trovato
+  Fix:
+    controlla percorso e quoting
+
+7) alias file non trovato
+  Fix:
+    usa --list-saved-files
+
+8) output vuoto o inatteso
+  Fix:
+    prova con --no-resume oppure --new
+
+--------------------------------------------------
+SEZIONE 14 — FILE LOCALI USATI DAL TOOL
+--------------------------------------------------
+
+Directory:
+  ~/.local/share/chatgpt/
+
+File usati:
+  history.log          cronologia dei prompt
+  last_response_id     stato dell'ultima conversazione
+  files.json           alias locali dei file_id
+
+--------------------------------------------------
+SEZIONE 15 — FILOSOFIA D'USO CONSIGLIATA
+--------------------------------------------------
+
+Per uso rapido:
+  chatgpt "domanda"
+
+Per lavoro serio su testo:
+  chatgpt -f input.txt -o output.md -s "istruzioni chiare"
+
+Per iterare su un tema in una sola sessione:
+  chatgpt -i
+
+Per riprendere una sessione precedente:
+  chatgpt --resume "prompt"
+
+Per documenti da riusare:
+  --upload-file una volta
+  --save-file-id
+  --use-file nelle richieste successive
+
+Per evitare sorprese da contesto precedente:
+  --no-resume
+  oppure
+  --new
+  oppure
+  --clear-state
+
+Fine manuale.
+EOF
+}
+
+
+# ============================================================================
+# HELP MODALITÀ INTERATTIVA
+# ============================================================================
+interactive_help() {
+  cat <<'EOF'
+Comandi interattivi:
+  /exit      Esce
+  /new       Resetta il contesto della conversazione corrente
+  /history   Mostra gli ultimi prompt salvati
+  /state     Mostra il previous_response_id corrente in memoria
+  /help      Mostra questo aiuto
+EOF
+}
+
+
+# ============================================================================
+# FUNZIONI UTILITY
+# ============================================================================
+die() {
+  echo "Errore: $*" >&2
+  exit 1
+}
+
+log() {
+  [ "$VERBOSE" -eq 1 ] || return 0
+
+  if [ "$SHOW_TIMESTAMPS" -eq 1 ]; then
+    printf '[%s] %s\
+' "$(date '+%H:%M:%S')" "$*" >&2
+  else
+    printf '%s\
+' "$*" >&2
+  fi
+}
+
+start_wait_notice() {
+  [ "$VERBOSE" -eq 1 ] || return 0
+  log "Richiesta inviata all'API. In attesa della risposta del modello..."
+}
+
+end_wait_notice() {
+  [ "$VERBOSE" -eq 1 ] || return 0
+  log "Risposta ricevuta dall'API."
+}
+
+require_api_key() {
+  [ -n "${OPENAI_API_KEY:-}" ] || die "OPENAI_API_KEY non impostata."
+}
+
+# ----------------------------------------------------------------------------
+# NUOVA FUNZIONE: require_command
+# ----------------------------------------------------------------------------
+# Controlla che un comando richiesto esista nel PATH.
+#
+# La usiamo soprattutto per:
+# - curl -> necessario per chiamare l'API
+# - jq   -> necessario per costruire/parlare JSON
+#
+# In questo modo, invece di fallire più avanti con errori poco chiari,
+# lo script segnala subito la dipendenza mancante.
+# ----------------------------------------------------------------------------
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "comando richiesto non trovato: $1"
+}
+
+validate_temperature() {
+  jq -en --argjson t "$TEMPERATURE" '$t' >/dev/null 2>&1 \
+    || die "temperatura non valida: $TEMPERATURE"
+}
+
+validate_tokens() {
+  if [ -n "$MAX_OUTPUT_TOKENS" ] && ! [[ "$MAX_OUTPUT_TOKENS" =~ ^[0-9]+$ ]]; then
+    die "max output tokens deve essere un intero positivo."
+  fi
+}
+
+validate_effort() {
+  case "$EFFORT" in
+    ""|minimal|low|medium|high) ;;
+    *) die "effort non valido: $EFFORT (usa: minimal|low|medium|high)" ;;
+  esac
+}
+
+validate_verbosity() {
+  case "$VERBOSITY" in
+    ""|low|medium|high) ;;
+    *) die "verbosity non valida: $VERBOSITY (usa: low|medium|high)" ;;
+  esac
+}
+
+# ----------------------------------------------------------------------------
+# NUOVA FUNZIONE: is_http_success
+# ----------------------------------------------------------------------------
+# Ritorna successo solo se lo status HTTP è nella fascia 2xx.
+#
+# Esempi considerati successo:
+# - 200
+# - 201
+# - 204
+#
+# Esempi considerati errore:
+# - 400
+# - 401
+# - 404
+# - 429
+# - 500
+# ----------------------------------------------------------------------------
+is_http_success() {
+  local status="$1"
+  [[ "$status" =~ ^2[0-9][0-9]$ ]]
+}
+
+show_history() {
+  tail -n 40 "$HISTORY_FILE" 2>/dev/null || true
+}
+
+show_state() {
+  if [ -f "$STATE_FILE" ]; then
+    cat "$STATE_FILE"
+  fi
+}
+
+clear_history_silent() {
+  rm -f "$HISTORY_FILE"
+}
+
+clear_history() {
+  clear_history_silent
+  echo "History cancellata."
+}
+
+# ----------------------------------------------------------------------------
+# NUOVA DISTINZIONE: clear_state_silent vs clear_state
+# ----------------------------------------------------------------------------
+# Abbiamo separato due funzioni:
+#
+# 1) clear_state_silent
+#    - cancella lo stato senza stampare messaggi
+#    - utile internamente, ad esempio per --new
+#
+# 2) clear_state
+#    - cancella lo stato e stampa un messaggio per l'utente
+#    - utile nei comandi espliciti tipo --clear-state
+# ----------------------------------------------------------------------------
+clear_state_silent() {
+  rm -f "$STATE_FILE"
+}
+
+clear_state() {
+  clear_state_silent
+  echo "Stato conversazione cancellato."
+}
+
+save_history() {
+  local prompt="$1"
+  printf "%s | model=%s | temp=%s | effort=%s | verbosity=%s | file=%s | prompt=%s\
+" \
+    "$(date '+%Y-%m-%d %H:%M:%S')" \
+    "$MODEL" \
+    "$TEMPERATURE" \
+    "${EFFORT:-default}" \
+    "${VERBOSITY:-default}" \
+    "${ATTACHED_FILE_ID:-none}" \
+    "$(printf '%s' "$prompt" | tr '\
+' ' ')" \
+    >> "$HISTORY_FILE"
+}
+
+# ----------------------------------------------------------------------------
+# ESTRAZIONE TESTO MIGLIORATA
+# ----------------------------------------------------------------------------
+# Versione più robusta rispetto a quella originale.
+#
+# Prima cercavamo solo questo percorso:
+#   .output[] -> type=="message" -> .content[] -> type=="output_text" -> .text
+#
+# Adesso proviamo in modo più resiliente:
+#
+# 1) Se esiste .output_text top-level, usiamo quello
+# 2) Altrimenti cerchiamo:
+#    - output di tipo "message" con content di tipo "output_text"
+#    - output di tipo "output_text" direttamente nell'array
+#
+# Questo aiuta a gestire più varianti della struttura di risposta.
+# ----------------------------------------------------------------------------
+
+extract_text() {
+  jq -r '
+    if (.output_text? // "") != "" then
+      .output_text
+    else
+      [
+        .output[]?
+        | if .type == "message" then
+            (.content[]? | select(.type == "output_text") | .text?)
+          elif .type == "output_text" then
+            .text?
+          else
+            empty
+          end
+      ]
+      | map(select(type == "string" and length > 0))
+      | join("\n")
+    end
+  '
+}
+
+extract_response_id() {
+  jq -r '.id // empty'
+}
+
+# ----------------------------------------------------------------------------
+# current_previous_id()
+# ----------------------------------------------------------------------------
+# Restituisce il previous_response_id da usare nella richiesta corrente.
+#
+# Logica:
+# - se FORCE_NEW=1, NON usiamo alcun previous id
+# - se RESUME=1 e STATE_FILE esiste, lo leggiamo
+# - altrimenti restituiamo stringa vuota
+# ----------------------------------------------------------------------------
+current_previous_id() {
+  if [ "$FORCE_NEW" -eq 1 ]; then
+    return 0
+  fi
+
+  if [ "$RESUME" -eq 1 ] && [ -f "$STATE_FILE" ]; then
+    cat "$STATE_FILE" 2>/dev/null || true
+  fi
+}
+
+# ----------------------------------------------------------------------------
+# FUNZIONE AGGIUNTA E MIGLIORATA: check_api_error
+# ----------------------------------------------------------------------------
+# Questa funzione controlla due livelli di errore:
+#
+# 1) livello HTTP
+#    Se lo status non è 2xx, consideriamo la chiamata fallita
+#
+# 2) livello JSON API
+#    Anche con HTTP 200, la risposta potrebbe contenere:
+#      { "error": ... }
+#
+# Inoltre controlliamo che il body sia JSON valido.
+#
+# Ritorna:
+# - 0 se tutto va bene
+# - 1 se c'è un errore
+# ----------------------------------------------------------------------------
+check_api_error() {
+  local response="$1"
+  local http_status="${2:-}"
+
+  if [ -n "$http_status" ] && ! is_http_success "$http_status"; then
+    return 1
+  fi
+
+  if ! printf '%s' "$response" | jq -e . >/dev/null 2>&1; then
+    return 1
+  fi
+
+  if printf '%s' "$response" | jq -e '.error? != null' >/dev/null 2>&1; then
+    return 1
+  fi
+
+  return 0
+}
+
+# ----------------------------------------------------------------------------
+# NUOVA FUNZIONE: print_api_error
+# ----------------------------------------------------------------------------
+# Stampa un errore API in modo più leggibile.
+#
+# Se la risposta contiene JSON:
+# - mostra HTTP status
+# - estrae message/type/code se presenti
+# - stampa anche il JSON completo formattato
+#
+# Se la risposta non è JSON:
+# - stampa semplicemente il body grezzo
+# ----------------------------------------------------------------------------
+print_api_error() {
+  local response="$1"
+  local http_status="${2:-}"
+
+  if [ -n "$http_status" ]; then
+    printf 'HTTP status: %s\
+' "$http_status" >&2
+  fi
+
+  if printf '%s' "$response" | jq -e . >/dev/null 2>&1; then
+    local message type code
+    message="$(printf '%s' "$response" | jq -r '.error.message // empty')"
+    type="$(printf '%s' "$response" | jq -r '.error.type // empty')"
+    code="$(printf '%s' "$response" | jq -r '.error.code // empty')"
+
+    [ -n "$message" ] && printf 'Messaggio API: %s\
+' "$message" >&2
+    [ -n "$type" ] && printf 'Tipo errore API: %s\
+' "$type" >&2
+    [ -n "$code" ] && printf 'Codice errore API: %s\
+' "$code" >&2
+
+    printf '%s' "$response" | jq >&2
+  else
+    printf '%s\
+' "$response" >&2
+  fi
+}
+
+
+# ============================================================================
+# GESTIONE ALIAS FILE LOCALI
+# ============================================================================
+save_file_alias() {
+  local spec="$1"
+  local name="${spec%%=*}"
+  local id="${spec#*=}"
+
+  [ -n "$name" ] || die "alias vuoto in --save-file-id"
+  [ -n "$id" ] || die "file_id vuoto in --save-file-id"
+  [ "$name" != "$spec" ] || die "usa formato NOME=ID per --save-file-id"
+
+  local tmp
+  tmp="$(mktemp)"
+
+  jq --arg name "$name" --arg id "$id" '.[$name] = $id' "$FILE_MAP" > "$tmp"
+  mv "$tmp" "$FILE_MAP"
+
+  echo "Salvato: $name -> $id"
+}
+
+resolve_file_alias() {
+  local name="$1"
+  jq -r --arg name "$name" '.[$name] // empty' "$FILE_MAP"
+}
+
+list_saved_files() {
+  jq -r 'to_entries[]? | "\(.key)\	\(.value)"' "$FILE_MAP"
+}
+
+remove_file_alias() {
+  local name="$1"
+  local tmp
+  tmp="$(mktemp)"
+
+  jq --arg name "$name" 'del(.[$name])' "$FILE_MAP" > "$tmp"
+  mv "$tmp" "$FILE_MAP"
+
+  echo "Alias rimosso: $name"
+}
+
+
+# ============================================================================
+# WRAPPER HTTP / API
+# ----------------------------------------------------------------------------
+# Questa è una delle parti nuove più importanti.
+#
+# Invece di usare curl "nudo" e basta, ora usiamo funzioni wrapper che:
+# - salvano il body in un file temporaneo
+# - catturano lo status HTTP separatamente
+# - gestiscono meglio gli errori di rete
+# - restituiscono il body via stdout
+# - salvano lo status in LAST_HTTP_STATUS
+#
+# Questo evita molti problemi tipici, ad esempio:
+# - non distinguere un 200 da un 404
+# - mischiare body e status nello stesso output
+# - perdere il body di errore
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# json_post_request(url, payload)
+# ----------------------------------------------------------------------------
+# Esegue una richiesta POST con body JSON.
+#
+# Restituisce:
+# - body su stdout
+# Salva:
+# - status HTTP in LAST_HTTP_STATUS
+#
+# Se curl fallisce a livello di rete/trasporto, lo script termina con die().
+# ----------------------------------------------------------------------------
+json_post_request() {
+  local url="$1"
+  local payload="$2"
+
+  local body_file headers_file response http_status curl_exit
+  body_file="$(mktemp)"
+  headers_file="$(mktemp)"
+
+  set +e
+  curl -sS \
+    -D "$headers_file" \
+    -o "$body_file" \
+    -w '%{http_code}' \
+    -H "Authorization: Bearer $OPENAI_API_KEY" \
+    -H "Content-Type: application/json" \
+    -X POST \
+    --data "$payload" \
+    "$url" > "${body_file}.status"
+  curl_exit=$?
+  set -e
+
+  if [ "$curl_exit" -ne 0 ]; then
+    rm -f "$body_file" "$headers_file" "${body_file}.status"
+    die "errore di rete/curl durante la chiamata POST a $url"
+  fi
+
+  response="$(cat "$body_file")"
+  http_status="$(tr -d '\r\n' < "${body_file}.status")"
+
+  LAST_HTTP_HEADERS="$(cat "$headers_file")"
+  LAST_HTTP_STATUS="$http_status"
+
+  rm -f "$body_file" "$headers_file" "${body_file}.status"
+
+  printf '%s' "$response"
+}
+
+# ----------------------------------------------------------------------------
+# json_get_request(url)
+# ----------------------------------------------------------------------------
+# Esegue una richiesta GET verso l'API e gestisce body/status come sopra.
+# ----------------------------------------------------------------------------
+json_get_request() {
+  local url="$1"
+
+  local body_file headers_file response http_status curl_exit
+  body_file="$(mktemp)"
+  headers_file="$(mktemp)"
+
+  set +e
+  curl -sS \
+    -D "$headers_file" \
+    -o "$body_file" \
+    -w '%{http_code}' \
+    -H "Authorization: Bearer $OPENAI_API_KEY" \
+    "$url" > "${body_file}.status"
+  curl_exit=$?
+  set -e
+
+  if [ "$curl_exit" -ne 0 ]; then
+    rm -f "$body_file" "$headers_file" "${body_file}.status"
+    die "errore di rete/curl durante la chiamata a $url"
+  fi
+
+  response="$(cat "$body_file")"
+  http_status="$(tr -d '\r\n' < "${body_file}.status")"
+
+  LAST_HTTP_HEADERS="$(cat "$headers_file")"
+  LAST_HTTP_STATUS="$http_status"
+
+  rm -f "$body_file" "$headers_file" "${body_file}.status"
+
+  printf '%s' "$response"
+}
+
+# ----------------------------------------------------------------------------
+# multipart_file_upload_request(path)
+# ----------------------------------------------------------------------------
+# Upload file via multipart/form-data.
+#
+# Anche qui:
+# - body restituito via stdout
+# - status salvato in LAST_HTTP_STATUS
+# ----------------------------------------------------------------------------
+multipart_file_upload_request() {
+  local path="$1"
+
+  local body_file headers_file response http_status curl_exit
+  body_file="$(mktemp)"
+  headers_file="$(mktemp)"
+
+  set +e
+  curl -sS \
+    -D "$headers_file" \
+    -o "$body_file" \
+    -w '%{http_code}' \
+    -H "Authorization: Bearer $OPENAI_API_KEY" \
+    -F purpose="user_data" \
+    -F "file=@$path" \
+    https://api.openai.com/v1/files > "${body_file}.status"
+  curl_exit=$?
+  set -e
+
+  if [ $curl_exit -ne 0 ]; then
+    rm -f "$body_file" "$headers_file" "${body_file}.status"
+    die "errore di rete/curl durante l'upload del file: $path"
+  fi
+
+  response="$(cat "$body_file")"
+  http_status="$(tr -d '\r\n' < "${body_file}.status")"
+
+  LAST_HTTP_HEADERS="$(cat "$headers_file")"
+  LAST_HTTP_STATUS="$http_status"
+
+  rm -f "$body_file" "$headers_file" "${body_file}.status"
+
+  printf '%s' "$response"
+}
+
+# ============================================================================
+# FILE API
+# ============================================================================
+upload_file_to_api() {
+  local path="$1"
+  [ -f "$path" ] || die "file non trovato: $path"
+
+  log "Upload file: $path"
+  log "Invio file a OpenAI..."
+
+  local response
+  response="$(multipart_file_upload_request "$path")"
+
+  log "Upload completato."
+  printf '%s' "$response"
+}
+
+check_file_exists_api() {
+  local file_id="$1"
+  json_get_request "https://api.openai.com/v1/files/$file_id"
+}
+
+
+# ============================================================================
+# COSTRUZIONE PAYLOAD E CHIAMATA API
+# ============================================================================
+build_payload() {
+  local prompt="$1"
+  local previous_id="${2:-}"
+
+  if [ -n "$ATTACHED_FILE_ID" ]; then
+    jq -n \
+      --arg model "$MODEL" \
+      --arg prompt "$prompt" \
+      --arg system "$SYSTEM_PROMPT" \
+      --argjson temp "$TEMPERATURE" \
+      --arg max_tokens "$MAX_OUTPUT_TOKENS" \
+      --arg effort "$EFFORT" \
+      --arg verbosity "$VERBOSITY" \
+      --arg previous_id "$previous_id" \
+      --arg file_id "$ATTACHED_FILE_ID" '
+      {
+        model: $model,
+        input: [
+          {
+            role: "user",
+            content: [
+              { type: "input_file", file_id: $file_id },
+              { type: "input_text", text: $prompt }
+            ]
+          }
+        ],
+        temperature: $temp
+      }
+      + (if $system != "" then {instructions: $system} else {} end)
+      + (if $max_tokens != "" then {max_output_tokens: ($max_tokens | tonumber)} else {} end)
+      + (if $previous_id != "" then {previous_response_id: $previous_id} else {} end)
+      + (if $effort != "" then {reasoning: {effort: $effort}} else {} end)
+      + (if $verbosity != "" then {text: {verbosity: $verbosity}} else {} end)
+    '
+  else
+    jq -n \
+      --arg model "$MODEL" \
+      --arg input "$prompt" \
+      --arg system "$SYSTEM_PROMPT" \
+      --argjson temp "$TEMPERATURE" \
+      --arg max_tokens "$MAX_OUTPUT_TOKENS" \
+      --arg effort "$EFFORT" \
+      --arg verbosity "$VERBOSITY" \
+      --arg previous_id "$previous_id" '
+      {
+        model: $model,
+        input: $input,
+        temperature: $temp
+      }
+      + (if $system != "" then {instructions: $system} else {} end)
+      + (if $max_tokens != "" then {max_output_tokens: ($max_tokens | tonumber)} else {} end)
+      + (if $previous_id != "" then {previous_response_id: $previous_id} else {} end)
+      + (if $effort != "" then {reasoning: {effort: $effort}} else {} end)
+      + (if $verbosity != "" then {text: {verbosity: $verbosity}} else {} end)
+    '
+  fi
+}
+
+call_api() {
+  local payload="$1"
+
+  start_wait_notice
+
+  local response
+  response="$(json_post_request "https://api.openai.com/v1/responses" "$payload")"
+
+  end_wait_notice
+  printf '%s' "$response"
+}
+
+print_response() {
+  local response="$1"
+
+  if [ "$RAW" -eq 1 ]; then
+    if printf '%s' "$response" | jq -e . >/dev/null 2>&1; then
+      printf '%s' "$response" | jq
+    else
+      printf '%s\
+' "$response"
+    fi
+  else
+    printf '%s' "$response" | extract_text
+  fi
+}
+
+save_raw_response() {
+  local response="$1"
+  local path="$2"
+  [ -n "$path" ] || return 0
+  printf '%s' "$response" > "$path"
+}
+
+save_http_headers() {
+  local headers="$1"
+  local path="$2"
+  [ -n "$path" ] || return 0
+  printf '%s' "$headers" > "$path"
+}
+
+save_http_status() {
+  local status="$1"
+  local path="$2"
+  [ -n "$path" ] || return 0
+  printf '%s\n' "$status" > "$path"
+}
+
+# ----------------------------------------------------------------------------
+# persist_state(response)
+# ----------------------------------------------------------------------------
+# Salva sempre l'ultimo response_id ricevuto, anche se RESUME=0.
+#
+# Questo comportamento è utile perché:
+# - il default è non riusare automaticamente il contesto
+# - però possiamo comunque conservarlo
+# - così l'utente può decidere in seguito di usare --resume
+# ----------------------------------------------------------------------------
+persist_state() {
+  local response="$1"
+  local response_id
+  response_id="$(printf '%s' "$response" | extract_response_id)"
+
+  if [ -n "$response_id" ]; then
+    printf '%s' "$response_id" > "$STATE_FILE"
+  fi
+}
+
+
+# ============================================================================
+# LETTURA DEL PROMPT
+# ============================================================================
+read_prompt() {
+  local prompt=""
+
+  if [ "$USE_STDIN" -eq 1 ]; then
+    prompt="$(cat)"
+  elif [ -n "$INPUT_FILE" ]; then
+    [ -f "$INPUT_FILE" ] || die "file non trovato: $INPUT_FILE"
+    prompt="$(cat "$INPUT_FILE")"
+  else
+    prompt="$*"
+  fi
+
+  [ -n "$prompt" ] || die "prompt mancante."
+  printf '%s' "$prompt"
+}
+
+
+# ============================================================================
+# GESTIONE MIGLIORATA DI --new
+# ----------------------------------------------------------------------------
+# apply_new_flag() viene chiamata solo nel flusso "chat request".
+#
+# Se FORCE_NEW=1:
+# - cancella lo stato salvato su disco
+# - lascia continuare lo script
+# - la richiesta corrente non userà previous_response_id
+#
+# In questo modo --new fa davvero quello che promette:
+# "riparti da zero in questa richiesta"
+# ============================================================================
+apply_new_flag() {
+  if [ "$FORCE_NEW" -eq 1 ]; then
+    log "Opzione --new rilevata: azzero lo stato salvato e ignoro il contesto precedente."
+    clear_state_silent
+  fi
+}
+
+
+# ============================================================================
+# MODALITÀ SINGOLA
+# ============================================================================
+single_mode() {
+  local prompt
+  log "Lettura input..."
+  prompt="$(read_prompt "$@")"
+
+  log "Salvataggio history locale..."
+  save_history "$prompt"
+
+  local previous_id=""
+  previous_id="$(current_previous_id)"
+
+  if [ -n "$previous_id" ]; then
+    log "Uso previous_response_id salvato: $previous_id"
+  else
+    log "Nessun previous_response_id in uso."
+  fi
+
+  local payload response
+  log "Costruzione payload per modello: $MODEL"
+  payload="$(build_payload "$prompt" "$previous_id")"
+
+  log "Chiamata Responses API..."
+  response="$(call_api "$payload")"
+
+  if [ -n "$SAVE_RAW_FILE" ]; then
+    log "Salvataggio body JSON grezzo in: $SAVE_RAW_FILE"
+    save_raw_response "$response" "$SAVE_RAW_FILE"
+  fi
+
+  if [ -n "$SAVE_HEADERS_FILE" ]; then
+    log "Salvataggio header HTTP in: $SAVE_HEADERS_FILE"
+    save_http_headers "$LAST_HTTP_HEADERS" "$SAVE_HEADERS_FILE"
+  fi
+
+  if [ -n "$SAVE_STATUS_FILE" ]; then
+    log "Salvataggio status HTTP in: $SAVE_STATUS_FILE"
+    save_http_status "$LAST_HTTP_STATUS" "$SAVE_STATUS_FILE"
+  fi
+
+  log "HTTP status ricevuto: ${LAST_HTTP_STATUS:-sconosciuto}"
+  log "Verifica errori API..."
+  if ! check_api_error "$response" "$LAST_HTTP_STATUS"; then
+    log "Errore restituito dall'API."
+    print_api_error "$response" "$LAST_HTTP_STATUS"
+    exit 1
+  fi
+
+  if [ -n "$SAVE_RAW_FILE" ]; then
+    log "Salvataggio JSON grezzo in: $SAVE_RAW_FILE"
+    save_raw_response "$response" "$SAVE_RAW_FILE"
+  fi
+
+  log "Persistenza stato conversazione..."
+  persist_state "$response"
+
+  if [ -n "$OUTPUT_FILE" ] && [ "$RAW" -eq 0 ]; then
+    log "Estrazione testo e salvataggio in: $OUTPUT_FILE"
+    print_response "$response" > "$OUTPUT_FILE"
+    echo "Salvato in: $OUTPUT_FILE"
+  else
+    log "Stampa output."
+    print_response "$response"
+  fi
+}
+
+
+# ============================================================================
+# MODALITÀ INTERATTIVA
+# ============================================================================
+interactive_mode() {
+  interactive_help
+  echo
+
+  local previous_id=""
+  previous_id="$(current_previous_id)"
+
+  if [ -n "$previous_id" ]; then
+    log "Modalità interattiva avviata con previous_response_id: $previous_id"
+  else
+    log "Modalità interattiva avviata senza previous_response_id iniziale."
+  fi
+
+  while true; do
+    printf "you> "
+    IFS= read -r prompt || break
+
+    case "$prompt" in
+      /exit)
+        break
+        ;;
+      /new)
+        previous_id=""
+        clear_state_silent
+        echo "Nuova conversazione."
+        continue
+        ;;
+      /history)
+        show_history
+        continue
+        ;;
+      /state)
+        if [ -n "$previous_id" ]; then
+          echo "$previous_id"
+        else
+          echo "(vuoto)"
+        fi
+        continue
+        ;;
+      /help)
+        interactive_help
+        continue
+        ;;
+      "")
+        continue
+        ;;
+    esac
+
+    log "Salvataggio history locale..."
+    save_history "$prompt"
+
+    local payload response
+    log "Costruzione payload per modello: $MODEL"
+    payload="$(build_payload "$prompt" "$previous_id")"
+
+    log "Chiamata Responses API..."
+    response="$(call_api "$payload")"
+
+  if [ -n "$SAVE_RAW_FILE" ]; then
+    log "Salvataggio body JSON grezzo in: $SAVE_RAW_FILE"
+    save_raw_response "$response" "$SAVE_RAW_FILE"
+  fi
+
+  if [ -n "$SAVE_HEADERS_FILE" ]; then
+    log "Salvataggio header HTTP in: $SAVE_HEADERS_FILE"
+    save_http_headers "$LAST_HTTP_HEADERS" "$SAVE_HEADERS_FILE"
+  fi
+
+  if [ -n "$SAVE_STATUS_FILE" ]; then
+    log "Salvataggio status HTTP in: $SAVE_STATUS_FILE"
+    save_http_status "$LAST_HTTP_STATUS" "$SAVE_STATUS_FILE"
+  fi
+
+    if [ -n "${LAST_HTTP_STATUS:-}" ]; then
+  log "HTTP status ricevuto: $LAST_HTTP_STATUS"
+else
+  log "HTTP status ricevuto: sconosciuto"
+fi
+
+    log "Verifica errori API..."
+    if ! check_api_error "$response" "$LAST_HTTP_STATUS"; then
+      log "Errore restituito dall'API."
+      print_api_error "$response" "$LAST_HTTP_STATUS"
+      continue
+    fi
+
+    if [ -n "$SAVE_RAW_FILE" ]; then
+      log "Salvataggio JSON grezzo in: $SAVE_RAW_FILE"
+      save_raw_response "$response" "$SAVE_RAW_FILE"
+    fi
+
+    log "Output ricevuto e validato."
+
+    if [ "$RAW" -eq 1 ]; then
+      log "Stampa output raw."
+      print_response "$response"
+    else
+      log "Estrazione e stampa testo."
+      echo
+      print_response "$response"
+      echo
+    fi
+
+    log "Aggiornamento stato conversazione..."
+    previous_id="$(printf '%s' "$response" | extract_response_id)"
+
+    if [ -n "$previous_id" ]; then
+      printf '%s' "$previous_id" > "$STATE_FILE"
+      log "previous_response_id salvato."
+    else
+      log "Nessun previous_response_id restituito."
+    fi
+  done
+}
+
+
+# ============================================================================
+# PARSING ARGOMENTI
+# ============================================================================
+if [ $# -eq 0 ]; then
+  usage
+fi
+
+POSITIONAL=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -m)
+      [ $# -ge 2 ] || die "manca valore per -m"
+      MODEL="$2"
+      shift 2
+      ;;
+    -t)
+      [ $# -ge 2 ] || die "manca valore per -t"
+      TEMPERATURE="$2"
+      shift 2
+      ;;
+    -s)
+      [ $# -ge 2 ] || die "manca valore per -s"
+      SYSTEM_PROMPT="$2"
+      shift 2
+      ;;
+    -f)
+      [ $# -ge 2 ] || die "manca valore per -f"
+      INPUT_FILE="$2"
+      shift 2
+      ;;
+    -o)
+      [ $# -ge 2 ] || die "manca valore per -o"
+      OUTPUT_FILE="$2"
+      shift 2
+      ;;
+    -k)
+      [ $# -ge 2 ] || die "manca valore per -k"
+      MAX_OUTPUT_TOKENS="$2"
+      shift 2
+      ;;
+    -r)
+      RAW=1
+      shift
+      ;;
+    -i)
+      INTERACTIVE=1
+      shift
+      ;;
+    --stdin)
+      USE_STDIN=1
+      shift
+      ;;
+    --quiet)
+      VERBOSE=0
+      shift
+      ;;
+    --no-timestamps)
+      SHOW_TIMESTAMPS=0
+      shift
+      ;;
+    --effort)
+      [ $# -ge 2 ] || die "manca valore per --effort"
+      EFFORT="$2"
+      shift 2
+      ;;
+    --verbosity)
+      [ $# -ge 2 ] || die "manca valore per --verbosity"
+      VERBOSITY="$2"
+      shift 2
+      ;;
+    --resume)
+      RESUME=1
+      shift
+      ;;
+    --no-resume)
+      RESUME=0
+      shift
+      ;;
+    --new)
+      FORCE_NEW=1
+      shift
+      ;;
+    --history)
+      show_history
+      exit 0
+      ;;
+    --state)
+      show_state
+      exit 0
+      ;;
+    --clear-history)
+      clear_history
+      exit 0
+      ;;
+    --clear-state)
+      clear_state
+      exit 0
+      ;;
+    --upload-file)
+      [ $# -ge 2 ] || die "manca valore per --upload-file"
+      UPLOAD_FILE="$2"
+      shift 2
+      ;;
+    --file-id)
+      [ $# -ge 2 ] || die "manca valore per --file-id"
+      ATTACHED_FILE_ID="$2"
+      shift 2
+      ;;
+    --save-file-id)
+      [ $# -ge 2 ] || die "manca valore per --save-file-id"
+      SAVE_FILE_SPEC="$2"
+      shift 2
+      ;;
+    --use-file)
+      [ $# -ge 2 ] || die "manca valore per --use-file"
+      USE_FILE_ALIAS="$2"
+      shift 2
+      ;;
+    --list-saved-files)
+      SHOW_SAVED_FILES=1
+      shift
+      ;;
+    --remove-saved-file)
+      [ $# -ge 2 ] || die "manca valore per --remove-saved-file"
+      REMOVE_FILE_ALIAS="$2"
+      shift 2
+      ;;
+    --check-file)
+      [ $# -ge 2 ] || die "manca valore per --check-file"
+      CHECK_FILE_ID="$2"
+      shift 2
+      ;;
+        --save-raw)
+      [ $# -ge 2 ] || die "manca valore per --save-raw"
+      SAVE_RAW_FILE="$2"
+      shift 2
+      ;;
+    --save-headers)
+      [ $# -ge 2 ] || die "manca valore per --save-headers"
+      SAVE_HEADERS_FILE="$2"
+      shift 2
+      ;;
+    --save-status)
+      [ $# -ge 2 ] || die "manca valore per --save-status"
+      SAVE_STATUS_FILE="$2"
+      shift 2
+      ;;
+    --manual)
+      manual
+      exit 0
+      ;;
+    -h|--help)
+      usage
+      ;;
+    --)
+      shift
+      while [ $# -gt 0 ]; do
+        POSITIONAL+=("$1")
+        shift
+      done
+      ;;
+    -*)
+      die "opzione sconosciuta: $1"
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+
+set +u
+set -- "${POSITIONAL[@]}"
+set -u
+
+
+# ============================================================================
+# CLASSIFICAZIONE DEL TIPO DI OPERAZIONE
+# ----------------------------------------------------------------------------
+# Questa sezione aiuta a capire "cosa vuole fare" il comando:
+#
+# 1) Operazioni solo su alias locali
+#    es: --save-file-id, --list-saved-files, --remove-saved-file
+#
+# 2) Operazioni Files API
+#    es: --upload-file, --check-file
+#
+# 3) Richiesta chat vera e propria
+#    es: prompt, -i, --stdin, -f, --file-id, --use-file
+#
+# Questo ci permette di:
+# - richiedere solo le dipendenze necessarie
+# - evitare di chiedere API key quando non serve
+# - gestire meglio i conflitti tra modalità
+# ============================================================================
+FILE_ALIAS_OP=0
+FILE_API_OP=0
+CHAT_REQUEST_OP=0
+
+if [ -n "$SAVE_FILE_SPEC" ] || [ "$SHOW_SAVED_FILES" -eq 1 ] || [ -n "$REMOVE_FILE_ALIAS" ]; then
+  FILE_ALIAS_OP=1
+fi
+
+if [ -n "$UPLOAD_FILE" ] || [ -n "$CHECK_FILE_ID" ]; then
+  FILE_API_OP=1
+fi
+
+if [ "$INTERACTIVE" -eq 1 ] || [ "$USE_STDIN" -eq 1 ] || [ -n "$INPUT_FILE" ] || [ $# -gt 0 ] || [ -n "$ATTACHED_FILE_ID" ] || [ -n "$USE_FILE_ALIAS" ]; then
+  CHAT_REQUEST_OP=1
+fi
+
+
+# ============================================================================
+# VALIDAZIONE COERENZA TRA MODALITÀ
+# ============================================================================
+if [ "$FILE_ALIAS_OP" -eq 1 ] && { [ "$FILE_API_OP" -eq 1 ] || [ "$CHAT_REQUEST_OP" -eq 1 ]; }; then
+  die "le operazioni sugli alias (--save-file-id, --list-saved-files, --remove-saved-file) vanno usate da sole"
+fi
+
+if [ -n "$UPLOAD_FILE" ] && [ -n "$CHECK_FILE_ID" ]; then
+  die "usa solo uno tra --upload-file e --check-file"
+fi
+
+if [ "$FILE_API_OP" -eq 1 ] && [ "$CHAT_REQUEST_OP" -eq 1 ]; then
+  die "--upload-file e --check-file non sono compatibili con una normale richiesta chat"
+fi
+
+if [ "$FORCE_NEW" -eq 1 ] && [ "$CHAT_REQUEST_OP" -eq 0 ]; then
+  die "--new ha senso solo insieme a una richiesta chat o con -i"
+fi
+
+if [ "$FILE_ALIAS_OP" -eq 0 ] && [ "$FILE_API_OP" -eq 0 ] && [ "$CHAT_REQUEST_OP" -eq 0 ]; then
+  die "nessuna azione richiesta. Passa un prompt, usa -i, oppure un comando come --history"
+fi
+
+
+# ============================================================================
+# OPERAZIONI SOLO SU ALIAS LOCALI
+# ----------------------------------------------------------------------------
+# Queste operazioni richiedono jq, ma non curl e non OPENAI_API_KEY.
+# ============================================================================
+if [ "$FILE_ALIAS_OP" -eq 1 ]; then
+  require_command jq
+
+  if [ -n "$SAVE_FILE_SPEC" ]; then
+    save_file_alias "$SAVE_FILE_SPEC"
+    exit 0
+  fi
+
+  if [ "$SHOW_SAVED_FILES" -eq 1 ]; then
+    list_saved_files
+    exit 0
+  fi
+
+  if [ -n "$REMOVE_FILE_ALIAS" ]; then
+    remove_file_alias "$REMOVE_FILE_ALIAS"
+    exit 0
+  fi
+fi
+
+
+# ============================================================================
+# OPERAZIONI FILES API
+# ----------------------------------------------------------------------------
+# Queste operazioni richiedono:
+# - jq   -> per formattare la risposta JSON
+# - curl -> per chiamare l'API
+# - OPENAI_API_KEY
+# ============================================================================
+if [ "$FILE_API_OP" -eq 1 ]; then
+  require_command jq
+  require_command curl
+  require_api_key
+
+  if [ -n "$UPLOAD_FILE" ]; then
+    response="$(upload_file_to_api "$UPLOAD_FILE")"
+    if ! check_api_error "$response" "$LAST_HTTP_STATUS"; then
+      print_api_error "$response" "$LAST_HTTP_STATUS"
+      exit 1
+    fi
+    printf '%s' "$response" | jq
+    exit 0
+  fi
+
+  if [ -n "$CHECK_FILE_ID" ]; then
+    response="$(check_file_exists_api "$CHECK_FILE_ID")"
+    if ! check_api_error "$response" "$LAST_HTTP_STATUS"; then
+      print_api_error "$response" "$LAST_HTTP_STATUS"
+      exit 1
+    fi
+    printf '%s' "$response" | jq
+    exit 0
+  fi
+fi
+
+
+# ============================================================================
+# VALIDAZIONE RICHIESTA CHAT
+# ----------------------------------------------------------------------------
+# Da qui in avanti siamo nel flusso "richiesta chat".
+# Quindi servono curl, jq e API key.
+# ============================================================================
+require_command jq
+require_command curl
+require_api_key
+
+validate_temperature
+validate_tokens
+validate_effort
+validate_verbosity
+
+if [ "$USE_STDIN" -eq 1 ] && [ -n "$INPUT_FILE" ]; then
+  die "usa solo uno tra --stdin e -f"
+fi
+
+if [ "$INTERACTIVE" -eq 1 ] && [ "$USE_STDIN" -eq 1 ]; then
+  die "--stdin non è compatibile con -i"
+fi
+
+if [ "$INTERACTIVE" -eq 1 ] && [ -n "$INPUT_FILE" ]; then
+  die "-f non è compatibile con -i"
+fi
+
+if [ "$INTERACTIVE" -eq 1 ] && [ $# -gt 0 ]; then
+  die "non passare un prompt posizionale insieme a -i"
+fi
+
+if [ -n "$ATTACHED_FILE_ID" ] && [ -n "$USE_FILE_ALIAS" ]; then
+  die "usa solo uno tra --file-id e --use-file"
+fi
+
+# Se l'utente ha passato --use-file, risolviamo l'alias nel file_id reale
+if [ -n "$USE_FILE_ALIAS" ]; then
+  ATTACHED_FILE_ID="$(resolve_file_alias "$USE_FILE_ALIAS")"
+  [ -n "$ATTACHED_FILE_ID" ] || die "alias non trovato: $USE_FILE_ALIAS"
+fi
+
+# Applichiamo l'effetto di --new solo ora, nel flusso chat
+apply_new_flag
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+if [ "$INTERACTIVE" -eq 1 ]; then
+  interactive_mode
+else
+  single_mode "$@"
+fi
