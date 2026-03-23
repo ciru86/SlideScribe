@@ -90,7 +90,7 @@ prompt_nonempty() {
 prompt_choice_12() {
   local value=""
   while true; do
-    printf "Seleziona modalità ROI (1 = Slide Area = Trigger area, 2 = Slide Area ≠ Trigger area): " > /dev/tty
+    printf "Seleziona modalità ROI (1 = Slide Area e trigger area uguali e rettangolari, 2 = Slide Area ≠ Trigger area e Slide Area poligonale ): " > /dev/tty
     IFS= read -r value < /dev/tty
     case "$value" in
       1|2)
