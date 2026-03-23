@@ -282,15 +282,6 @@ shellcheck Slidescribe_v2.sh
 
 ---
 
-## Roadmap
-
-* Parallel chunk processing
-* Deterministic slide detection improvements
-* Optional GUI (SwiftUI frontend)
-* Config file (YAML/JSON) instead of interactive input
-
----
-
 ## Contributing
 
 PRs should:
