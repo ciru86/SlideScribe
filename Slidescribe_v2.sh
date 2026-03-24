@@ -121,7 +121,7 @@ build_llm_prompt() {
   local terminology_section=""
 
   if [[ -n "$lesson_topic" ]]; then
-    intro_line="Ti fornisco un file TXT strutturato in chunk di slide. È la sbobinatura di una lezione su **${lesson_topic}**, ottenuta da trascrizione automatica (Whisper / speech-to-text), quindi può contenere errori di trascrizione, punteggiatura imperfetta, termini tecnici sbagliati e frasi poco naturali."
+    intro_line="Ti fornisco un file TXT strutturato in chunk di slide. È la sbobinatura di una lezione. **${lesson_topic}**. È stata ottenuta da trascrizione automatica (Whisper / speech-to-text), quindi può contenere errori di trascrizione, punteggiatura imperfetta, termini tecnici sbagliati e frasi poco naturali."
   else
     intro_line="Ti fornisco un file TXT strutturato in chunk di slide. È la sbobinatura di una lezione ottenuta da trascrizione automatica (Whisper / speech-to-text), quindi può contenere errori di trascrizione, punteggiatura imperfetta, termini tecnici sbagliati e frasi poco naturali."
   fi
