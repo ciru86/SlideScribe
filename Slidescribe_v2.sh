@@ -113,8 +113,7 @@ prompt_optional() {
   printf "%s " "$message" > /dev/tty
   IFS= read -r value < /dev/tty
   value="$(trim "$value")"
-  printf '%s
-' "$value"
+  printf '%s\n' "$value"
 }
 
 build_llm_prompt() {
@@ -145,8 +144,10 @@ Il tuo compito è ripulire il testo associato a ciascuna slide, migliorandone la
 
 Regole obbligatorie:
 - NON modificare i delimitatori di chunk
-- NON modificare le intestazioni del tipo `----- BEGIN SLIDE 0001 -----`
-- NON modificare le intestazioni del tipo `----- END SLIDE 0001 -----`
+- NON modificare le intestazioni del tipo \
+`----- BEGIN SLIDE 0001 -----`
+- NON modificare le intestazioni del tipo \
+`----- END SLIDE 0001 -----`
 - NON modificare la riga `TEXT:`
 - NON aggiungere o rimuovere slide
 - NON rinumerare le slide
@@ -174,15 +175,6 @@ produrre un testo più leggibile, ma semanticamente fedele all’originale.
 
 Restituisci esclusivamente il testo corretto nello stesso identico formato ricevuto.
 EOF
-}
-
-validate_youtube_url() {
-  local url="$1"
-  local validation_log
-  validation_log="${TMPDIR:-/tmp}/slidescribe_validate_ytdlp.$$ .stderr.log"
-  validation_log="${validation_log// /}"
-  run_ytdlp_with_fallback "$validation_log" "validazione URL" --simulate --skip-download -- "$url" >/dev/null
-  rm -f "$validation_log"
 }
 
 extract_json_field_with_python() {
@@ -251,15 +243,14 @@ move_final_outputs_to_workdir() {
   log "DOCX spostato in: $FINAL_DOCX"
 }
 
-
 usage() {
   cat <<'EOF'
 Uso:
-  Slidescribe_v2.sh [opzioni]
+  Slidescribe_v2.3.sh [opzioni]
 
 Opzioni:
   --cookie           Usa yt-dlp con --cookies-from-browser Safari
-  -v, --verbose      Mostra a schermo anche i messaggi che vengono salvati in $LOG_DIR
+  -v, --verbose      Mostra a schermo i log “umani”; Screenshot_grabber va live anche a terminale
   -h, --help         Mostra questo aiuto
 
 Nota yt-dlp fallback:
@@ -291,25 +282,6 @@ parse_args() {
   done
 }
 
-build_ytdlp_base_cmd() {
-  local -a cmd
-  cmd=(yt-dlp --no-playlist)
-
-  if [ "$USE_SAFARI_COOKIES" -eq 1 ]; then
-    cmd+=(--cookies-from-browser Safari)
-  fi
-
-  printf '%s
-' "${cmd[@]}"
-}
-
-build_ytdlp_fallback_cmd() {
-  local -a cmd
-  cmd=("$YTDLP_FALLBACK_PATH" --no-playlist --cookies-from-browser Safari --impersonate "Safari-26.0:Macos-26")
-  printf '%s
-' "${cmd[@]}"
-}
-
 run_logged_command() {
   local stdout_log="$1"
   local stderr_log="$2"
@@ -317,7 +289,9 @@ run_logged_command() {
   shift 3
 
   if [ "$show_on_screen" = "1" ] || [ "$show_on_screen" = "always" ] || [ "$VERBOSE_LOGS" -eq 1 ]; then
-    "$@"       > >(tee "$stdout_log")       2> >(tee "$stderr_log" >&2)
+    "$@" \
+      > >(tee "$stdout_log") \
+      2> >(tee "$stderr_log" >&2)
   else
     "$@" >"$stdout_log" 2>"$stderr_log"
   fi
@@ -342,6 +316,8 @@ run_ytdlp_with_fallback() {
   if [ "$VERBOSE_LOGS" -eq 1 ]; then
     log "yt-dlp primario (${action_label}): ${base_cmd[*]} $*"
   fi
+
+  : > "$stderr_log"
 
   set +e
   "${base_cmd[@]}" "$@" 2> >(tee -a "$stderr_log" >&2)
@@ -371,6 +347,15 @@ run_ytdlp_with_fallback() {
     die "yt-dlp fallito anche col fallback per ${action_label} (exit ${rc}). Vedi log: $stderr_log"
   fi
 }
+
+validate_youtube_url() {
+  local url="$1"
+  local validation_log
+  validation_log="${TMPDIR:-/tmp}/slidescribe_validate_ytdlp.$$.stderr.log"
+  run_ytdlp_with_fallback "$validation_log" "validazione URL" --simulate --skip-download -- "$url" >/dev/null
+  rm -f "$validation_log"
+}
+
 run_chatgpt_upload() {
   local chunk_file="$1"
 
@@ -382,22 +367,22 @@ run_chatgpt_upload() {
 }
 
 # ============================================================
-# CHECK PRELIMINARI
+# ARGOMENTI CLI
 # ============================================================
 parse_args "$@"
 
-require_command python3
+# ============================================================
+# CHECK DIPENDENZE
+# ============================================================
 require_command yt-dlp
-require_command ffmpeg
 require_command chatgpt
+require_command python3
+require_command find
+require_command sort
+require_command head
+require_command tee
 
-if [ -x "$YTDLP_FALLBACK_PATH" ]; then
-  log "Fallback yt-dlp disponibile: $YTDLP_FALLBACK_PATH"
-else
-  log "Fallback yt-dlp non trovato o non eseguibile: $YTDLP_FALLBACK_PATH"
-fi
-
-[ -x "$VENV_PYTHON" ] || die "Virtualenv non trovato o non valido: $VENV_PYTHON"
+require_file "$VENV_PYTHON"
 require_file "${SCRIPT_DIR}/${SCREENSHOT_SCRIPT}"
 require_file "${SCRIPT_DIR}/${EXPORT_SCRIPT}"
 require_file "${SCRIPT_DIR}/${IMPORT_SCRIPT}"
@@ -437,15 +422,12 @@ FINAL_DOCX_IN_SLIDES="${SLIDES_DIR}/${VIDEO_BASENAME}.docx"
 FINAL_PDF="${WORKDIR}/${VIDEO_BASENAME}.pdf"
 FINAL_DOCX="${WORKDIR}/${VIDEO_BASENAME}.docx"
 
-SLIDES_DIR="${WORKDIR}/${VIDEO_BASENAME} slides"
-
 LLM_CHUNKS_DIR="${WORKDIR}/llm_chunks"
 LLM_CORRECTED_DIR="${WORKDIR}/llm_corrected"
 LLM_MERGED_DIR="${WORKDIR}/llm_merged"
 MERGED_SLIDE_TEXTS_JSON="${LLM_MERGED_DIR}/${VIDEO_BASENAME}.slide_texts.json"
 
 LOG_DIR="${WORKDIR}/logs"
-
 mkdir -p "$LOG_DIR" "$LLM_CHUNKS_DIR" "$LLM_CORRECTED_DIR" "$LLM_MERGED_DIR"
 
 SCREENSHOT_STDOUT="${LOG_DIR}/screenshot.stdout.log"
@@ -463,6 +445,9 @@ IMPORT_STDERR="${LOG_DIR}/import.stderr.log"
 PDF_STDOUT="${LOG_DIR}/pdf.stdout.log"
 PDF_STDERR="${LOG_DIR}/pdf.stderr.log"
 
+YTDLP_VIDEO_STDERR="${LOG_DIR}/ytdlp_video.stderr.log"
+YTDLP_SUBS_STDERR="${LOG_DIR}/ytdlp_subs.stderr.log"
+
 # ============================================================
 # STEP 1: VIDEO
 # ============================================================
@@ -470,8 +455,7 @@ if file_exists_nonempty "$VIDEO_PATH"; then
   log "Video già presente, skip download: $VIDEO_PATH"
 else
   log "Download video in massima qualità + remux MKV..."
-  yt-dlp \
-    --no-playlist \
+  run_ytdlp_with_fallback "$YTDLP_VIDEO_STDERR" "download video" \
     -f "bv*+ba/b" \
     --remux-video mkv \
     -o "${WORKDIR}/${VIDEO_BASENAME}.%(ext)s" \
@@ -488,8 +472,7 @@ if file_exists_nonempty "$ORIGINAL_SRT"; then
   log "SRT originale già presente, skip download: $ORIGINAL_SRT"
 else
   log "Download sottotitoli automatici italiani + conversione SRT..."
-  yt-dlp \
-    --no-playlist \
+  run_ytdlp_with_fallback "$YTDLP_SUBS_STDERR" "download sottotitoli" \
     --skip-download \
     --write-auto-subs \
     --sub-langs "it,it-IT,it.*,ita" \
@@ -497,11 +480,11 @@ else
     -o "${WORKDIR}/${VIDEO_BASENAME}.%(ext)s" \
     -- "$YOUTUBE_URL"
 
-  DOWNLOADED_SRT="$(
+  DOWNLOADED_SRT="$({
     find "$WORKDIR" -maxdepth 1 -type f \
       \( -name "${VIDEO_BASENAME}*.it*.srt" -o -name "${VIDEO_BASENAME}*.srt" \) \
       | sort | head -n 1
-  )"
+  })"
 
   [ -n "${DOWNLOADED_SRT:-}" ] || die "Nessun file SRT trovato dopo il download dei sottotitoli"
 
@@ -543,6 +526,7 @@ task_screenshots() {
   local -a cmd
   cmd=(
     "$VENV_PYTHON"
+    -u
     "${SCRIPT_DIR}/${SCREENSHOT_SCRIPT}"
     "$VIDEO_PATH"
     -o "$SLIDES_DIR"
@@ -579,13 +563,23 @@ run_llm_pipeline() {
   require_file "$ORIGINAL_SRT"
 
   log "Avvio export_for_llm.py..."
-  "$VENV_PYTHON" "${SCRIPT_DIR}/${EXPORT_SCRIPT}" \
-    --srt "$ORIGINAL_SRT" \
-    --slides-csv "$slides_csv" \
-    --output-dir "$LLM_CHUNKS_DIR" \
-    --base-name "$VIDEO_BASENAME" \
-    --chunk-size "$CHUNK_SIZE" \
-    >"$EXPORT_STDOUT" 2>"$EXPORT_STDERR"
+  if [ "$VERBOSE_LOGS" -eq 1 ]; then
+    run_logged_command "$EXPORT_STDOUT" "$EXPORT_STDERR" 1 \
+      "$VENV_PYTHON" "${SCRIPT_DIR}/${EXPORT_SCRIPT}" \
+      --srt "$ORIGINAL_SRT" \
+      --slides-csv "$slides_csv" \
+      --output-dir "$LLM_CHUNKS_DIR" \
+      --base-name "$VIDEO_BASENAME" \
+      --chunk-size "$CHUNK_SIZE"
+  else
+    "$VENV_PYTHON" "${SCRIPT_DIR}/${EXPORT_SCRIPT}" \
+      --srt "$ORIGINAL_SRT" \
+      --slides-csv "$slides_csv" \
+      --output-dir "$LLM_CHUNKS_DIR" \
+      --base-name "$VIDEO_BASENAME" \
+      --chunk-size "$CHUNK_SIZE" \
+      >"$EXPORT_STDOUT" 2>"$EXPORT_STDERR"
+  fi
 
   expected_slides="$(count_slides_from_csv "$slides_csv")"
   [ -n "$expected_slides" ] || die "Impossibile contare le slide da $slides_csv"
@@ -614,29 +608,52 @@ run_llm_pipeline() {
     [ -n "$file_id" ] || die "Impossibile estrarre file_id per chunk: $chunk_file"
 
     log "Invio prompt a ChatGPT per chunk: $chunk_basename"
-    chatgpt \
-      --no-resume \
-      --save-raw "$raw_json_path" \
-      -o "$corrected_file" \
-      --file-id "$file_id" \
-      -m "$MODEL" \
-      -t "$TEMPERATURE" \
-      -k "$MAX_OUTPUT_TOKENS" \
-      --verbosity "$VERBOSITY" \
-      "$PROMPT_TEXT" \
-      2>>"$CHATGPT_RUN_STDERR"
+    if [ "$VERBOSE_LOGS" -eq 1 ]; then
+      chatgpt \
+        --no-resume \
+        --save-raw "$raw_json_path" \
+        -o "$corrected_file" \
+        --file-id "$file_id" \
+        -m "$MODEL" \
+        -t "$TEMPERATURE" \
+        -k "$MAX_OUTPUT_TOKENS" \
+        --verbosity "$VERBOSITY" \
+        "$PROMPT_TEXT" \
+        2> >(tee -a "$CHATGPT_RUN_STDERR" >&2)
+    else
+      chatgpt \
+        --no-resume \
+        --save-raw "$raw_json_path" \
+        -o "$corrected_file" \
+        --file-id "$file_id" \
+        -m "$MODEL" \
+        -t "$TEMPERATURE" \
+        -k "$MAX_OUTPUT_TOKENS" \
+        --verbosity "$VERBOSITY" \
+        "$PROMPT_TEXT" \
+        2>>"$CHATGPT_RUN_STDERR"
+    fi
 
     require_file "$corrected_file"
     log "Chunk corretto salvato: $corrected_file"
   done
 
   log "Avvio import_corrected_for_pdf_docx.py..."
-  "$VENV_PYTHON" "${SCRIPT_DIR}/${IMPORT_SCRIPT}" \
-    --input-dir "$LLM_CORRECTED_DIR" \
-    --base-name "$VIDEO_BASENAME" \
-    --output-dir "$LLM_MERGED_DIR" \
-    --expected-slides "$expected_slides" \
-    >"$IMPORT_STDOUT" 2>"$IMPORT_STDERR"
+  if [ "$VERBOSE_LOGS" -eq 1 ]; then
+    run_logged_command "$IMPORT_STDOUT" "$IMPORT_STDERR" 1 \
+      "$VENV_PYTHON" "${SCRIPT_DIR}/${IMPORT_SCRIPT}" \
+      --input-dir "$LLM_CORRECTED_DIR" \
+      --base-name "$VIDEO_BASENAME" \
+      --output-dir "$LLM_MERGED_DIR" \
+      --expected-slides "$expected_slides"
+  else
+    "$VENV_PYTHON" "${SCRIPT_DIR}/${IMPORT_SCRIPT}" \
+      --input-dir "$LLM_CORRECTED_DIR" \
+      --base-name "$VIDEO_BASENAME" \
+      --output-dir "$LLM_MERGED_DIR" \
+      --expected-slides "$expected_slides" \
+      >"$IMPORT_STDOUT" 2>"$IMPORT_STDERR"
+  fi
 
   require_file "$MERGED_SLIDE_TEXTS_JSON"
   log "JSON finale slide texts pronto: $MERGED_SLIDE_TEXTS_JSON"
@@ -674,12 +691,21 @@ require_file "$MERGED_SLIDE_TEXTS_JSON"
 # ============================================================
 log "Avvio slides_and_texts_to_pdf.py..."
 
-"$VENV_PYTHON" "${SCRIPT_DIR}/${PDF_SCRIPT}" \
-  --input-dir "$SLIDES_DIR" \
-  --csv "slides.csv" \
-  --slide-texts "$MERGED_SLIDE_TEXTS_JSON" \
-  --output-base "$VIDEO_BASENAME" \
-  >"$PDF_STDOUT" 2>"$PDF_STDERR"
+if [ "$VERBOSE_LOGS" -eq 1 ]; then
+  run_logged_command "$PDF_STDOUT" "$PDF_STDERR" 1 \
+    "$VENV_PYTHON" "${SCRIPT_DIR}/${PDF_SCRIPT}" \
+    --input-dir "$SLIDES_DIR" \
+    --csv "slides.csv" \
+    --slide-texts "$MERGED_SLIDE_TEXTS_JSON" \
+    --output-base "$VIDEO_BASENAME"
+else
+  "$VENV_PYTHON" "${SCRIPT_DIR}/${PDF_SCRIPT}" \
+    --input-dir "$SLIDES_DIR" \
+    --csv "slides.csv" \
+    --slide-texts "$MERGED_SLIDE_TEXTS_JSON" \
+    --output-base "$VIDEO_BASENAME" \
+    >"$PDF_STDOUT" 2>"$PDF_STDERR"
+fi
 
 move_final_outputs_to_workdir
 cleanup_intermediate_srts
