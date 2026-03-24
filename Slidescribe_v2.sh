@@ -14,6 +14,9 @@ TEMPERATURE="0.5"
 MAX_OUTPUT_TOKENS="70000"
 VERBOSITY="low"
 CHUNK_SIZE="20"
+USE_SAFARI_COOKIES=0
+VERBOSE_LOGS=0
+YTDLP_FALLBACK_PATH="$HOME/.local/bin/yt-dlp"
 
 # ============================================================
 # PATH PROGETTO / PYTHON DEL VENV
@@ -175,7 +178,11 @@ EOF
 
 validate_youtube_url() {
   local url="$1"
-  yt-dlp --simulate --skip-download --no-playlist -- "$url" >/dev/null 2>&1
+  local validation_log
+  validation_log="${TMPDIR:-/tmp}/slidescribe_validate_ytdlp.$$ .stderr.log"
+  validation_log="${validation_log// /}"
+  run_ytdlp_with_fallback "$validation_log" "validazione URL" --simulate --skip-download -- "$url" >/dev/null
+  rm -f "$validation_log"
 }
 
 extract_json_field_with_python() {
@@ -244,13 +251,151 @@ move_final_outputs_to_workdir() {
   log "DOCX spostato in: $FINAL_DOCX"
 }
 
+
+usage() {
+  cat <<'EOF'
+Uso:
+  Slidescribe_v2.sh [opzioni]
+
+Opzioni:
+  --cookie           Usa yt-dlp con --cookies-from-browser Safari
+  -v, --verbose      Mostra a schermo anche i messaggi che vengono salvati in $LOG_DIR
+  -h, --help         Mostra questo aiuto
+
+Nota yt-dlp fallback:
+  Se yt-dlp fallisce, lo script prova automaticamente ~/.local/bin/yt-dlp
+  aggiungendo anche:
+    --cookies-from-browser Safari
+    --impersonate Safari-26.0:Macos-26
+EOF
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --cookie)
+        USE_SAFARI_COOKIES=1
+        ;;
+      -v|--verbose)
+        VERBOSE_LOGS=1
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Opzione non riconosciuta: $1"
+        ;;
+    esac
+    shift
+  done
+}
+
+build_ytdlp_base_cmd() {
+  local -a cmd
+  cmd=(yt-dlp --no-playlist)
+
+  if [ "$USE_SAFARI_COOKIES" -eq 1 ]; then
+    cmd+=(--cookies-from-browser Safari)
+  fi
+
+  printf '%s
+' "${cmd[@]}"
+}
+
+build_ytdlp_fallback_cmd() {
+  local -a cmd
+  cmd=("$YTDLP_FALLBACK_PATH" --no-playlist --cookies-from-browser Safari --impersonate "Safari-26.0:Macos-26")
+  printf '%s
+' "${cmd[@]}"
+}
+
+run_logged_command() {
+  local stdout_log="$1"
+  local stderr_log="$2"
+  local show_on_screen="${3:-0}"
+  shift 3
+
+  if [ "$show_on_screen" = "1" ] || [ "$show_on_screen" = "always" ] || [ "$VERBOSE_LOGS" -eq 1 ]; then
+    "$@"       > >(tee "$stdout_log")       2> >(tee "$stderr_log" >&2)
+  else
+    "$@" >"$stdout_log" 2>"$stderr_log"
+  fi
+}
+
+run_ytdlp_with_fallback() {
+  local stderr_log="$1"
+  local action_label="$2"
+  shift 2
+
+  local -a base_cmd
+  local -a fallback_cmd
+  local rc=0
+
+  base_cmd=(yt-dlp --no-playlist)
+  if [ "$USE_SAFARI_COOKIES" -eq 1 ]; then
+    base_cmd+=(--cookies-from-browser Safari)
+  fi
+
+  fallback_cmd=("$YTDLP_FALLBACK_PATH" --no-playlist --cookies-from-browser Safari --impersonate "Safari-26.0:Macos-26")
+
+  if [ "$VERBOSE_LOGS" -eq 1 ]; then
+    log "yt-dlp primario (${action_label}): ${base_cmd[*]} $*"
+  fi
+
+  set +e
+  "${base_cmd[@]}" "$@" 2> >(tee -a "$stderr_log" >&2)
+  rc=$?
+  set -e
+
+  if [ $rc -eq 0 ]; then
+    return 0
+  fi
+
+  log "yt-dlp primario fallito per ${action_label} (exit ${rc}). Provo fallback: $YTDLP_FALLBACK_PATH"
+
+  if [ ! -x "$YTDLP_FALLBACK_PATH" ]; then
+    die "yt-dlp primario fallito e fallback non disponibile/eseguibile: $YTDLP_FALLBACK_PATH"
+  fi
+
+  if [ "$VERBOSE_LOGS" -eq 1 ]; then
+    log "yt-dlp fallback (${action_label}): ${fallback_cmd[*]} $*"
+  fi
+
+  set +e
+  "${fallback_cmd[@]}" "$@" 2> >(tee -a "$stderr_log" >&2)
+  rc=$?
+  set -e
+
+  if [ $rc -ne 0 ]; then
+    die "yt-dlp fallito anche col fallback per ${action_label} (exit ${rc}). Vedi log: $stderr_log"
+  fi
+}
+run_chatgpt_upload() {
+  local chunk_file="$1"
+
+  if [ "$VERBOSE_LOGS" -eq 1 ]; then
+    chatgpt --upload-file "$chunk_file" 2> >(tee -a "$CHATGPT_UPLOAD_STDERR" >&2)
+  else
+    chatgpt --upload-file "$chunk_file" 2>>"$CHATGPT_UPLOAD_STDERR"
+  fi
+}
+
 # ============================================================
 # CHECK PRELIMINARI
 # ============================================================
+parse_args "$@"
+
 require_command python3
 require_command yt-dlp
 require_command ffmpeg
 require_command chatgpt
+
+if [ -x "$YTDLP_FALLBACK_PATH" ]; then
+  log "Fallback yt-dlp disponibile: $YTDLP_FALLBACK_PATH"
+else
+  log "Fallback yt-dlp non trovato o non eseguibile: $YTDLP_FALLBACK_PATH"
+fi
 
 [ -x "$VENV_PYTHON" ] || die "Virtualenv non trovato o non valido: $VENV_PYTHON"
 require_file "${SCRIPT_DIR}/${SCREENSHOT_SCRIPT}"
@@ -269,6 +414,8 @@ log "Cartella di lavoro: $WORKDIR"
 YOUTUBE_URL="$(prompt_nonempty "Inserisci URL video YouTube: ")"
 validate_youtube_url "$YOUTUBE_URL" || die "URL YouTube non valido o non accessibile con yt-dlp"
 log "URL verificato"
+[ "$USE_SAFARI_COOKIES" -eq 1 ] && log "Cookie Safari abilitati per yt-dlp"
+[ "$VERBOSE_LOGS" -eq 1 ] && log "Modalità verbose abilitata: i log verranno mostrati anche a schermo"
 
 VIDEO_BASENAME="$(prompt_nonempty "Come vuoi chiamare il video finale (senza estensione)? ")"
 LESSON_TOPIC="$(prompt_optional "Inserisci l'argomento della lezione (lascia vuoto per usare la versione generica del prompt):")"
@@ -406,7 +553,9 @@ task_screenshots() {
   fi
 
   log "Avvio Screenshot_grabber..."
-  "${cmd[@]}" >"$SCREENSHOT_STDOUT" 2>"$SCREENSHOT_STDERR"
+  log "Stdout: $SCREENSHOT_STDOUT"
+  log "Stderr: $SCREENSHOT_STDERR"
+  run_logged_command "$SCREENSHOT_STDOUT" "$SCREENSHOT_STDERR" 1 "${cmd[@]}"
 
   [ -d "$SLIDES_DIR" ] || die "Screenshot_grabber terminato ma cartella slide non trovata: $SLIDES_DIR"
   [ -f "${SLIDES_DIR}/slides.csv" ] || die "Screenshot_grabber terminato ma slides.csv non trovato in: $SLIDES_DIR"
@@ -459,7 +608,7 @@ run_llm_pipeline() {
     fi
 
     log "Upload chunk a ChatGPT: $chunk_file"
-    upload_json="$(chatgpt --upload-file "$chunk_file" 2>>"$CHATGPT_UPLOAD_STDERR")"
+    upload_json="$(run_chatgpt_upload "$chunk_file")"
 
     file_id="$(extract_json_field_with_python "$upload_json" "id")"
     [ -n "$file_id" ] || die "Impossibile estrarre file_id per chunk: $chunk_file"
