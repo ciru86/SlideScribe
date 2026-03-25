@@ -1,0 +1,23 @@
+#export_for_llm.py
+python export_for_llm.py \
+  --srt "/percorso/OSAS2/OSAS2.original.srt" \
+  --slides-csv "/percorso/OSAS2/OSAS2 slides/slides.csv" \
+  --output-dir "/percorso/OSAS2/llm_chunks" \
+  --base-name "OSAS2" \
+  --chunk-size 20
+
+
+#import_corrected_for_pdf_docx.py
+python import_corrected_for_pdf_docx.py \
+  --input-dir "/percorso/OSAS2/llm_corrected" \
+  --base-name "OSAS2" \
+  --output-dir "/percorso/OSAS2/llm_merged" \
+  --expected-slides 150
+
+
+#slides_and_subtitles_to_pdf.py
+python slides_and_subtitles_to_pdf.py \
+  --input-dir "/percorso/OSAS2/OSAS2 slides" \
+  --csv "slides.csv" \
+  --slide-texts "/percorso/OSAS2/llm_merged/OSAS2.slide_texts.json" \
+  --output-base "OSAS2"
