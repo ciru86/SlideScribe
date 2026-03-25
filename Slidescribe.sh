@@ -37,7 +37,7 @@ YTDLP_CMD=()
 
 MODEL="gpt-5.4"
 TEMPERATURE="0.3"
-MAX_OUTPUT_TOKENS="70000"
+MAX_OUTPUT_TOKENS=""
 EFFORT=""
 VERBOSITY="normal"
 CHUNK_SIZE="20"
@@ -52,7 +52,9 @@ LESSON_TOPIC=""
 TERMINOLOGY_CONTEXT=""
 TERMINOLOGY_FILE=""
 PROMPT_FILE=""
+CONFIG_DEFAULT="config/slidescribe.conf"
 CONFIG_FILE=""
+CONFIG_FILE_EXPLICIT=""
 
 NON_INTERACTIVE=0
 DRY_RUN=0
@@ -251,7 +253,8 @@ Conservazione / debug:
   --keep-temp
 
 Config:
-  --config FILE
+  --config [usa il default config/slidescribe.conf]
+  --config-file FILE
 
 Altre:
   -h, --help
@@ -266,9 +269,9 @@ Esempi:
     --terminology-file ~/glossari/osas.txt \
     --roi-mode separate
 
-  Slidescribe.sh --config run.conf --temperature 0.5 --verbosity debug
-  Slidescribe.sh --config run.conf --from-step llm --force-all
-  Slidescribe.sh --config run.conf --non-interactive --dry-run
+  Slidescribe.sh --config --temperature 0.5 --verbosity debug
+  Slidescribe.sh --config-file run.conf --from-step llm --force-all
+  Slidescribe.sh --config-file run.conf --non-interactive --dry-run
 
 Per una descrizione completa delle interazioni tra flag, usa:
   Slidescribe.sh --manual
@@ -522,10 +525,14 @@ move_final_outputs_to_workdir() {
 load_config_file() {
   local config_path="$1"
   [ -n "$config_path" ] || return 0
+
+  if [[ "$config_path" != /* ]]; then
+    config_path="${SCRIPT_DIR}/${config_path}"
+  fi
+
   [ -f "$config_path" ] || die "Config file non trovato: $config_path"
 
   debug "Carico config file: $config_path"
-  # shellcheck disable=SC1090
   source "$config_path"
 
   # importa solo le variabili previste, se definite nel config
@@ -541,7 +548,6 @@ load_config_file() {
   CHUNK_SIZE="${CHUNK_SIZE:-$CHUNK_SIZE}"
   MODEL="${MODEL:-$MODEL}"
   TEMPERATURE="${TEMPERATURE:-$TEMPERATURE}"
-  MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-$MAX_OUTPUT_TOKENS}"
   EFFORT="${EFFORT:-$EFFORT}"
   VERBOSITY="${VERBOSITY:-$VERBOSITY}"
   COOKIES_FROM_BROWSER="${COOKIES_FROM_BROWSER:-$COOKIES_FROM_BROWSER}"
@@ -632,8 +638,11 @@ parse_args() {
         PROMPT_FILE="$1"
         ;;
       --config)
-        shift; [ "$#" -gt 0 ] || die "Valore mancante per --config"
-        CONFIG_FILE="$1"
+        CONFIG_FILE="$CONFIG_DEFAULT"
+        ;;
+      --config-file)
+        shift; [ "$#" -gt 0 ] || die "Valore mancante per --config-file"
+        CONFIG_FILE_EXPLICIT="$1"
         ;;
       --keep-intermediate-srts)
         KEEP_INTERMEDIATE_SRTS=1
@@ -751,7 +760,9 @@ normalize_and_validate_args() {
   fi
 
   validate_number "--chunk-size" "$CHUNK_SIZE"
+  if [ -n "$MAX_OUTPUT_TOKENS" ]; then
   validate_number "--max-output-tokens" "$MAX_OUTPUT_TOKENS"
+fi
   validate_float "--temperature" "$TEMPERATURE"
 
   [ -z "$TERMINOLOGY_FILE" ] || require_file "$TERMINOLOGY_FILE"
@@ -798,7 +809,6 @@ resolve_inputs() {
 
   mkdir -p "$WORKDIR"
   WORKDIR="$(cd "$WORKDIR" && pwd)"
-}
 
   if [ "$SKIP_DOWNLOAD" -eq 0 ] || [ "$SKIP_SUBS" -eq 0 ]; then
     if [ -z "$YOUTUBE_URL" ]; then
@@ -1057,6 +1067,7 @@ MAX_OUTPUT_TOKENS="$MAX_OUTPUT_TOKENS"
 EFFORT="$EFFORT"
 VERBOSITY="$VERBOSITY"
 PROMPT_FILE="$PROMPT_FILE"
+CONFIG_FILE="$CONFIG_FILE"
 KEEP_INTERMEDIATE_SRTS="$KEEP_INTERMEDIATE_SRTS"
 KEEP_RAW_JSON="$KEEP_RAW_JSON"
 KEEP_TEMP="$KEEP_TEMP"
@@ -1262,9 +1273,12 @@ run_llm_pipeline() {
       --file-id "$file_id"
       -m "$MODEL"
       -t "$TEMPERATURE"
-      -k "$MAX_OUTPUT_TOKENS"
       --verbosity "$VERBOSITY"
     )
+
+    if [ -n "$MAX_OUTPUT_TOKENS" ]; then
+      chatgpt_cmd+=(-k "$MAX_OUTPUT_TOKENS")
+    fi
 
     if [ -n "$EFFORT" ]; then
       chatgpt_cmd+=(--effort "$EFFORT")
@@ -1364,6 +1378,13 @@ PRESET_VERBOSITY="$VERBOSITY"
 PRESET_PROMPT_FILE="$PROMPT_FILE"
 
 parse_args "$@"
+if [ -n "$CONFIG_FILE_EXPLICIT" ]; then
+  CONFIG_FILE="$CONFIG_FILE_EXPLICIT"
+fi
+
+if [ -n "$CONFIG_FILE" ] && [ ! -f "$CONFIG_FILE" ]; then
+  die "Config file non trovato: $CONFIG_FILE"
+fi
 
 # load config after parsing just to know CONFIG_FILE, then re-apply CLI overrides explicitly
 if [ -n "$CONFIG_FILE" ]; then
