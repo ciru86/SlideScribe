@@ -28,6 +28,25 @@ def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def close_cv_window(window_title: Optional[str] = None) -> None:
+    """
+    Forza la chiusura effettiva delle finestre OpenCV.
+    Su macOS, destroyWindow()/destroyAllWindows() da sole possono non bastare:
+    la finestra può restare visibile finché l'event loop GUI non viene processato
+    ancora per qualche tick.
+    """
+    try:
+        if window_title:
+            cv2.destroyWindow(window_title)
+        else:
+            cv2.destroyAllWindows()
+    except cv2.error:
+        pass
+
+    for _ in range(8):
+        cv2.waitKey(1)
+
+
 def format_timestamp(seconds: float) -> str:
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
@@ -156,8 +175,7 @@ def interactive_select_named_roi(video_path: str, window_title: str, prompt: str
 
     print(f"\n{prompt}\n")
     roi = cv2.selectROI(window_title, display, fromCenter=False, showCrosshair=True)
-    cv2.destroyWindow(window_title)
-    cv2.waitKey(1)
+    close_cv_window(window_title)
 
     x, y, rw, rh = roi
     if rw == 0 or rh == 0:
@@ -230,112 +248,6 @@ def warp_quad_to_rect(frame: np.ndarray, quad: QuadROI) -> np.ndarray:
     matrix = cv2.getPerspectiveTransform(quad, dst)
     warped = cv2.warpPerspective(frame, matrix, (out_w, out_h))
     return warped
-
-
-def gamma_correction(img: np.ndarray, gamma: float) -> np.ndarray:
-    if gamma <= 0:
-        return img
-    inv_gamma = 1.0 / gamma
-    table = np.array([
-        ((i / 255.0) ** inv_gamma) * 255 for i in range(256)
-    ], dtype=np.uint8)
-    return cv2.LUT(img, table)
-
-
-def auto_white_balance_grayworld(img: np.ndarray) -> np.ndarray:
-    """
-    Gray-world WB leggero: corregge dominanti colore senza stravolgere l'immagine.
-    """
-    img_f = img.astype(np.float32)
-    b, g, r = cv2.split(img_f)
-
-    mean_b = np.mean(b)
-    mean_g = np.mean(g)
-    mean_r = np.mean(r)
-    mean_gray = (mean_b + mean_g + mean_r) / 3.0
-
-    eps = 1e-6
-    scale_b = mean_gray / (mean_b + eps)
-    scale_g = mean_gray / (mean_g + eps)
-    scale_r = mean_gray / (mean_r + eps)
-
-    b *= scale_b
-    g *= scale_g
-    r *= scale_r
-
-    balanced = cv2.merge([b, g, r])
-    balanced = np.clip(balanced, 0, 255).astype(np.uint8)
-    return balanced
-
-
-def unsharp_mask(img: np.ndarray, sigma: float = 1.0, amount: float = 0.4) -> np.ndarray:
-    blurred = cv2.GaussianBlur(img, (0, 0), sigma)
-    sharpened = cv2.addWeighted(img, 1.0 + amount, blurred, -amount, 0)
-    return np.clip(sharpened, 0, 255).astype(np.uint8)
-
-
-def enhance_slide(img: np.ndarray, preset: str = "mild") -> np.ndarray:
-    """
-    Miglioramento conservativo per slide:
-    - white balance leggero
-    - CLAHE sulla luminanza
-    - piccola gamma correction
-    - lieve sharpen finale
-    """
-    if preset == "off":
-        return img
-
-    settings = {
-        "mild": {
-            "clahe_clip": 2.0,
-            "clahe_grid": (8, 8),
-            "gamma": 1.06,
-            "sharpen_amount": 0.30,
-            "denoise": False,
-        },
-        "medium": {
-            "clahe_clip": 2.6,
-            "clahe_grid": (8, 8),
-            "gamma": 1.10,
-            "sharpen_amount": 0.42,
-            "denoise": True,
-        },
-        "strong": {
-            "clahe_clip": 3.2,
-            "clahe_grid": (8, 8),
-            "gamma": 1.14,
-            "sharpen_amount": 0.55,
-            "denoise": True,
-        },
-    }
-
-    if preset not in settings:
-        raise ValueError(f"Preset enhancement non valido: {preset}")
-
-    cfg = settings[preset]
-    out = img.copy()
-
-    out = auto_white_balance_grayworld(out)
-
-    if cfg["denoise"]:
-        out = cv2.fastNlMeansDenoisingColored(out, None, 3, 3, 7, 21)
-
-    lab = cv2.cvtColor(out, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-
-    clahe = cv2.createCLAHE(
-        clipLimit=cfg["clahe_clip"],
-        tileGridSize=cfg["clahe_grid"],
-    )
-    l = clahe.apply(l)
-
-    lab = cv2.merge((l, a, b))
-    out = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-
-    out = gamma_correction(out, cfg["gamma"])
-    out = unsharp_mask(out, sigma=1.0, amount=cfg["sharpen_amount"])
-
-    return out
 
 
 def build_quad_preview(display_frame: np.ndarray, points: List[Point]) -> np.ndarray:
@@ -424,12 +336,10 @@ def interactive_select_quad(video_path: str, window_title: str, prompt: str) -> 
         elif key in (ord('r'), ord('R')):
             points = []
         elif key == 27:
-            cv2.destroyWindow(window_title)
-            cv2.waitKey(1)
+            close_cv_window(window_title)
             raise RuntimeError("Selezione quadrilatero annullata.")
 
-    cv2.destroyWindow(window_title)
-    cv2.waitKey(1)
+    close_cv_window(window_title)
 
     pts = np.array(points, dtype=np.float32)
     pts /= scale
@@ -542,8 +452,6 @@ def extract_slides(
     dedup_mean_diff_threshold: float,
     save_first_slide: bool,
     use_separate_trigger_roi: bool,
-    enhance_slides: bool,
-    enhance_preset: str,
 ) -> None:
     if output_dir is None:
         output_dir = default_output_dir_from_video(video_path)
@@ -615,16 +523,11 @@ def extract_slides(
         current_trigger_roi = crop_roi(frame, trigger_roi)
         time_sec = frame_idx / fps
 
-        if enhance_slides:
-            current_warped_slide_to_save = enhance_slide(current_warped_slide, enhance_preset)
-        else:
-            current_warped_slide_to_save = current_warped_slide
-
         if prev_saved_roi is None:
             if save_first_slide:
-                img_to_save = current_warped_slide_to_save if save_mode == "crop" else frame
+                img_to_save = current_warped_slide if save_mode == "crop" else frame
                 filename = save_image(img_to_save, output_dir, slide_index, time_sec)
-                records.append(SlideCapture(slide_index, time_sec, filename, current_warped_slide_to_save))
+                records.append(SlideCapture(slide_index, time_sec, filename, current_warped_slide))
                 print(f"[SALVATA] Slide {slide_index} @ {time_sec:.1f}s -> {filename}")
                 slide_index += 1
 
@@ -657,14 +560,9 @@ def extract_slides(
                     stable_warped_slide = warp_quad_to_rect(stable_frame, slide_quad)
                     stable_trigger_roi = crop_roi(stable_frame, trigger_roi)
 
-                    if enhance_slides:
-                        stable_warped_slide_to_save = enhance_slide(stable_warped_slide, enhance_preset)
-                    else:
-                        stable_warped_slide_to_save = stable_warped_slide
-
-                    img_to_save = stable_warped_slide_to_save if save_mode == "crop" else stable_frame
+                    img_to_save = stable_warped_slide if save_mode == "crop" else stable_frame
                     filename = save_image(img_to_save, output_dir, slide_index, stable_time)
-                    records.append(SlideCapture(slide_index, stable_time, filename, stable_warped_slide_to_save))
+                    records.append(SlideCapture(slide_index, stable_time, filename, stable_warped_slide))
 
                     print(
                         f"[SALVATA] Slide {slide_index} @ {stable_time:.1f}s "
@@ -680,6 +578,7 @@ def extract_slides(
         sample_idx += 1
 
     cap.release()
+    close_cv_window()
 
     print("\nDeduplicazione finale...")
     records = deduplicate_records(
@@ -779,17 +678,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Permette di selezionare una ROI trigger rettangolare separata; altrimenti usa il bounding box della quadrilatera slide"
     )
-    parser.add_argument(
-        "--enhance-slides",
-        action="store_true",
-        help="Applica un miglioramento automatico conservativo alle slide rettificate prima del salvataggio"
-    )
-    parser.add_argument(
-        "--enhance-preset",
-        choices=["mild", "medium", "strong"],
-        default="mild",
-        help="Preset di enhancement da usare con --enhance-slides (default: mild)"
-    )
 
     return parser
 
@@ -813,8 +701,6 @@ def main() -> None:
         dedup_mean_diff_threshold=args.dedup_mean_diff_threshold,
         save_first_slide=not args.no_first_slide,
         use_separate_trigger_roi=args.separate_trigger_roi,
-        enhance_slides=args.enhance_slides,
-        enhance_preset=args.enhance_preset,
     )
 
 

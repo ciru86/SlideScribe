@@ -39,12 +39,15 @@ MODEL="gpt-5.4"
 TEMPERATURE="0.3"
 MAX_OUTPUT_TOKENS=""
 EFFORT=""
-VERBOSITY="normal"
+SCRIPT_VERBOSITY="normal"
+LLM_VERBOSITY="low"
 CHUNK_SIZE="20"
 YTDLP_MODE="auto"              # auto | system | fallback
 SUB_LANGS="it,it-IT,it.*,ita"
 COOKIES_FROM_BROWSER=""
 ROI_MODE=""                    # shared | separate
+ENHANCE_SLIDE=0               # 0 | 1
+ENHANCE_PRESET=""             # mild | medium | strong
 WORKDIR=""
 YOUTUBE_URL=""
 VIDEO_BASENAME=""
@@ -227,6 +230,8 @@ Input principali:
 
 Modalità operative:
   --roi-mode shared|separate
+  --enhance-slide
+  --enhance-preset mild|medium|strong
   --ytdlp-mode auto|system|fallback
   --cookies-from-browser BROWSER
   --non-interactive
@@ -244,8 +249,11 @@ LLM:
   --temperature FLOAT
   --max-output-tokens N
   --effort VALUE
-  --verbosity quiet|normal|verbose|debug
+  --llm-verbosity low|medium|high
   --chunk-size N
+
+Logging script:
+  --verbosity quiet|normal|verbose|debug
 
 Conservazione / debug:
   --keep-intermediate-srts
@@ -352,13 +360,26 @@ MANUALE
    Aggiunge --cookies-from-browser <BROWSER> al comando yt-dlp selezionato.
    Esempi: Safari, Brave, Firefox
 
-11) VERBOSITY
+10b) ENHANCE SCREENSHOT
+   --enhance-slide
+     abilita il miglioramento automatico delle slide nel modulo Screenshot_grabber.py
+
+   --enhance-preset mild|medium|strong
+     seleziona l'intensità del miglioramento
+     richiede --enhance-slide
+
+11) SCRIPT VERBOSITY
+   Controlla solo i log dello script bash:
    quiet   = output minimo
    normal  = log standard
    verbose = log standard + output live dei task principali
    debug   = verbose + messaggi diagnostici extra
 
-12) CONFIG FILE
+12) LLM VERBOSITY
+   Controlla solo la verbosità del client chatgpt.
+   Valori tipici: low | medium | high
+
+13) CONFIG FILE
    Formato consigliato: shell-compatible .conf
 
    Esempio:
@@ -379,7 +400,7 @@ MANUALE
      COOKIES_FROM_BROWSER="Safari"
      KEEP_RAW_JSON="1"
 
-13) DRY RUN
+14) DRY RUN
    Risolve configurazione, controlla coerenza, stampa il piano di esecuzione e termina.
 EOF
 }
@@ -545,11 +566,14 @@ load_config_file() {
   TERMINOLOGY_CONTEXT="${TERMINOLOGY_CONTEXT:-$TERMINOLOGY_CONTEXT}"
   TERMINOLOGY_FILE="${TERMINOLOGY_FILE:-$TERMINOLOGY_FILE}"
   ROI_MODE="${ROI_MODE:-$ROI_MODE}"
+  ENHANCE_SLIDE
+  ENHANCE_PRESET
   CHUNK_SIZE="${CHUNK_SIZE:-$CHUNK_SIZE}"
   MODEL="${MODEL:-$MODEL}"
   TEMPERATURE="${TEMPERATURE:-$TEMPERATURE}"
   EFFORT="${EFFORT:-$EFFORT}"
-  VERBOSITY="${VERBOSITY:-$VERBOSITY}"
+  SCRIPT_VERBOSITY="${SCRIPT_VERBOSITY:-$SCRIPT_VERBOSITY}"
+  LLM_VERBOSITY="${LLM_VERBOSITY:-$LLM_VERBOSITY}"
   COOKIES_FROM_BROWSER="${COOKIES_FROM_BROWSER:-$COOKIES_FROM_BROWSER}"
   PROMPT_FILE="${PROMPT_FILE:-$PROMPT_FILE}"
   KEEP_INTERMEDIATE_SRTS="${KEEP_INTERMEDIATE_SRTS:-$KEEP_INTERMEDIATE_SRTS}"
@@ -597,6 +621,13 @@ parse_args() {
         shift; [ "$#" -gt 0 ] || die "Valore mancante per --roi-mode"
         ROI_MODE="$1"
         ;;
+        --enhance-slide)
+        ENHANCE_SLIDE=1
+        ;;
+      --enhance-preset)
+        shift; [ "$#" -gt 0 ] || die "Valore mancante per --enhance-preset"
+        ENHANCE_PRESET="$1"
+        ;;
       --chunk-size)
         shift; [ "$#" -gt 0 ] || die "Valore mancante per --chunk-size"
         CHUNK_SIZE="$1"
@@ -629,9 +660,13 @@ parse_args() {
         shift; [ "$#" -gt 0 ] || die "Valore mancante per --effort"
         EFFORT="$1"
         ;;
-      --verbosity)
+      --verbosity|--script-verbosity)
         shift; [ "$#" -gt 0 ] || die "Valore mancante per --verbosity"
-        VERBOSITY="$1"
+        SCRIPT_VERBOSITY="$1"
+        ;;
+      --llm-verbosity)
+        shift; [ "$#" -gt 0 ] || die "Valore mancante per --llm-verbosity"
+        LLM_VERBOSITY="$1"
         ;;
       --prompt-file)
         shift; [ "$#" -gt 0 ] || die "Valore mancante per --prompt-file"
@@ -698,7 +733,7 @@ parse_args() {
 }
 
 apply_verbosity_mode() {
-  case "$VERBOSITY" in
+    case "$SCRIPT_VERBOSITY" in
     quiet)
       QUIET_LOGS=1
       VERBOSE_LOGS=0
@@ -720,7 +755,7 @@ apply_verbosity_mode() {
       DEBUG_LOGS=1
       ;;
     *)
-      die "Valore non valido per --verbosity: $VERBOSITY (attesi: quiet|normal|verbose|debug)"
+      die "Valore non valido per --verbosity: $SCRIPT_VERBOSITY (attesi: quiet|normal|verbose|debug)"
       ;;
   esac
 }
@@ -752,6 +787,21 @@ normalize_and_validate_args() {
     esac
   fi
 
+  if [ -n "$ENHANCE_PRESET" ]; then
+    case "$ENHANCE_PRESET" in
+      mild|medium|strong) ;;
+      *) die "Valore non valido per --enhance-preset: $ENHANCE_PRESET (attesi: mild|medium|strong)" ;;
+    esac
+  fi
+
+  if [ -n "$ENHANCE_PRESET" ] && [ "$ENHANCE_SLIDE" -ne 1 ]; then
+    die "--enhance-preset richiede --enhance-slide"
+  fi
+
+  if [ -n "$ENHANCE_PRESET" ] && [ -z "$ENHANCE_MODE" ]; then
+    die "--enhance-preset richiede --enhance"
+  fi
+
   if [ -n "$FROM_STEP" ]; then
     case "$FROM_STEP" in
       screenshots|llm|pdf) ;;
@@ -759,10 +809,15 @@ normalize_and_validate_args() {
     esac
   fi
 
+  case "$LLM_VERBOSITY" in
+    low|medium|high) ;;
+    *) die "Valore non valido per --llm-verbosity: $LLM_VERBOSITY (attesi: low|medium|high)" ;;
+  esac
   validate_number "--chunk-size" "$CHUNK_SIZE"
   if [ -n "$MAX_OUTPUT_TOKENS" ]; then
   validate_number "--max-output-tokens" "$MAX_OUTPUT_TOKENS"
-fi
+  fi
+
   validate_float "--temperature" "$TEMPERATURE"
 
   [ -z "$TERMINOLOGY_FILE" ] || require_file "$TERMINOLOGY_FILE"
@@ -1057,6 +1112,8 @@ VIDEO_BASENAME="$VIDEO_BASENAME"
 LESSON_TOPIC="$LESSON_TOPIC"
 TERMINOLOGY_FILE="$TERMINOLOGY_FILE"
 ROI_MODE="$ROI_MODE"
+ENHANCE_SLIDE="$ENHANCE_SLIDE"
+ENHANCE_PRESET="$ENHANCE_PRESET"
 CHUNK_SIZE="$CHUNK_SIZE"
 SUB_LANGS="$SUB_LANGS"
 YTDLP_MODE="$YTDLP_MODE"
@@ -1065,7 +1122,8 @@ MODEL="$MODEL"
 TEMPERATURE="$TEMPERATURE"
 MAX_OUTPUT_TOKENS="$MAX_OUTPUT_TOKENS"
 EFFORT="$EFFORT"
-VERBOSITY="$VERBOSITY"
+SCRIPT_VERBOSITY="$SCRIPT_VERBOSITY"
+LLM_VERBOSITY="$LLM_VERBOSITY"
 PROMPT_FILE="$PROMPT_FILE"
 CONFIG_FILE="$CONFIG_FILE"
 KEEP_INTERMEDIATE_SRTS="$KEEP_INTERMEDIATE_SRTS"
@@ -1188,6 +1246,14 @@ task_screenshots() {
     cmd+=(--separate-trigger-roi)
   fi
 
+    if [ "$ENHANCE_SLIDE" -eq 1 ]; then
+    cmd+=(--enhance-slide)
+  fi
+
+  if [ -n "$ENHANCE_PRESET" ]; then
+    cmd+=(--enhance-preset "$ENHANCE_PRESET")
+  fi
+
   log "Avvio Screenshot_grabber..."
   log "Stdout: $SCREENSHOT_STDOUT"
   log "Stderr: $SCREENSHOT_STDERR"
@@ -1273,7 +1339,7 @@ run_llm_pipeline() {
       --file-id "$file_id"
       -m "$MODEL"
       -t "$TEMPERATURE"
-      --verbosity "$VERBOSITY"
+      --verbosity "$LLM_VERBOSITY"
     )
 
     if [ -n "$MAX_OUTPUT_TOKENS" ]; then
@@ -1366,6 +1432,8 @@ PRESET_LESSON_TOPIC="$LESSON_TOPIC"
 PRESET_TERMINOLOGY_CONTEXT="$TERMINOLOGY_CONTEXT"
 PRESET_TERMINOLOGY_FILE="$TERMINOLOGY_FILE"
 PRESET_ROI_MODE="$ROI_MODE"
+PRESET_ENHANCE_SLIDE="$ENHANCE_SLIDE"
+PRESET_ENHANCE_PRESET="$ENHANCE_PRESET"
 PRESET_CHUNK_SIZE="$CHUNK_SIZE"
 PRESET_SUB_LANGS="$SUB_LANGS"
 PRESET_YTDLP_MODE="$YTDLP_MODE"
@@ -1374,7 +1442,8 @@ PRESET_MODEL="$MODEL"
 PRESET_TEMPERATURE="$TEMPERATURE"
 PRESET_MAX_OUTPUT_TOKENS="$MAX_OUTPUT_TOKENS"
 PRESET_EFFORT="$EFFORT"
-PRESET_VERBOSITY="$VERBOSITY"
+PRESET_SCRIPT_VERBOSITY="$SCRIPT_VERBOSITY"
+PRESET_LLM_VERBOSITY="$LLM_VERBOSITY"
 PRESET_PROMPT_FILE="$PROMPT_FILE"
 
 parse_args "$@"
@@ -1396,6 +1465,8 @@ if [ -n "$CONFIG_FILE" ]; then
   CLI_TERMINOLOGY_CONTEXT="$TERMINOLOGY_CONTEXT"
   CLI_TERMINOLOGY_FILE="$TERMINOLOGY_FILE"
   CLI_ROI_MODE="$ROI_MODE"
+  CLI_ENHANCE_SLIDE="$ENHANCE_SLIDE"
+  CLI_ENHANCE_PRESET="$ENHANCE_PRESET"
   CLI_CHUNK_SIZE="$CHUNK_SIZE"
   CLI_SUB_LANGS="$SUB_LANGS"
   CLI_YTDLP_MODE="$YTDLP_MODE"
@@ -1404,7 +1475,8 @@ if [ -n "$CONFIG_FILE" ]; then
   CLI_TEMPERATURE="$TEMPERATURE"
   CLI_MAX_OUTPUT_TOKENS="$MAX_OUTPUT_TOKENS"
   CLI_EFFORT="$EFFORT"
-  CLI_VERBOSITY="$VERBOSITY"
+  CLI_SCRIPT_VERBOSITY="$SCRIPT_VERBOSITY"
+  CLI_LLM_VERBOSITY="$LLM_VERBOSITY"
   CLI_PROMPT_FILE="$PROMPT_FILE"
   CLI_KEEP_INTERMEDIATE_SRTS="$KEEP_INTERMEDIATE_SRTS"
   CLI_KEEP_RAW_JSON="$KEEP_RAW_JSON"
@@ -1427,6 +1499,8 @@ if [ -n "$CONFIG_FILE" ]; then
   TERMINOLOGY_CONTEXT="$PRESET_TERMINOLOGY_CONTEXT"
   TERMINOLOGY_FILE="$PRESET_TERMINOLOGY_FILE"
   ROI_MODE="$PRESET_ROI_MODE"
+  ENHANCE_SLIDE="$PRESET_ENHANCE_SLIDE"
+  ENHANCE_PRESET="$PRESET_ENHANCE_PRESET"
   CHUNK_SIZE="$PRESET_CHUNK_SIZE"
   SUB_LANGS="$PRESET_SUB_LANGS"
   YTDLP_MODE="$PRESET_YTDLP_MODE"
@@ -1435,7 +1509,8 @@ if [ -n "$CONFIG_FILE" ]; then
   TEMPERATURE="$PRESET_TEMPERATURE"
   MAX_OUTPUT_TOKENS="$PRESET_MAX_OUTPUT_TOKENS"
   EFFORT="$PRESET_EFFORT"
-  VERBOSITY="$PRESET_VERBOSITY"
+  SCRIPT_VERBOSITY="$PRESET_SCRIPT_VERBOSITY"
+  LLM_VERBOSITY="$PRESET_LLM_VERBOSITY"
   PROMPT_FILE="$PRESET_PROMPT_FILE"
 
   load_config_file "$CONFIG_FILE"
@@ -1447,6 +1522,8 @@ if [ -n "$CONFIG_FILE" ]; then
   [ "$CLI_TERMINOLOGY_CONTEXT" = "$PRESET_TERMINOLOGY_CONTEXT" ] || TERMINOLOGY_CONTEXT="$CLI_TERMINOLOGY_CONTEXT"
   [ "$CLI_TERMINOLOGY_FILE" = "$PRESET_TERMINOLOGY_FILE" ] || TERMINOLOGY_FILE="$CLI_TERMINOLOGY_FILE"
   [ "$CLI_ROI_MODE" = "$PRESET_ROI_MODE" ] || ROI_MODE="$CLI_ROI_MODE"
+  [ "$CLI_ENHANCE_SLIDE" = "$PRESET_ENHANCE_SLIDE" ] || ENHANCE_SLIDE="$CLI_ENHANCE_SLIDE"
+  [ "$CLI_ENHANCE_PRESET" = "$PRESET_ENHANCE_PRESET" ] || ENHANCE_PRESET="$CLI_ENHANCE_PRESET"
   [ "$CLI_CHUNK_SIZE" = "$PRESET_CHUNK_SIZE" ] || CHUNK_SIZE="$CLI_CHUNK_SIZE"
   [ "$CLI_SUB_LANGS" = "$PRESET_SUB_LANGS" ] || SUB_LANGS="$CLI_SUB_LANGS"
   [ "$CLI_YTDLP_MODE" = "$PRESET_YTDLP_MODE" ] || YTDLP_MODE="$CLI_YTDLP_MODE"
@@ -1455,7 +1532,8 @@ if [ -n "$CONFIG_FILE" ]; then
   [ "$CLI_TEMPERATURE" = "$PRESET_TEMPERATURE" ] || TEMPERATURE="$CLI_TEMPERATURE"
   [ "$CLI_MAX_OUTPUT_TOKENS" = "$PRESET_MAX_OUTPUT_TOKENS" ] || MAX_OUTPUT_TOKENS="$CLI_MAX_OUTPUT_TOKENS"
   [ "$CLI_EFFORT" = "$PRESET_EFFORT" ] || EFFORT="$CLI_EFFORT"
-  [ "$CLI_VERBOSITY" = "$PRESET_VERBOSITY" ] || VERBOSITY="$CLI_VERBOSITY"
+  [ "$CLI_SCRIPT_VERBOSITY" = "$PRESET_SCRIPT_VERBOSITY" ] || SCRIPT_VERBOSITY="$CLI_SCRIPT_VERBOSITY"
+  [ "$CLI_LLM_VERBOSITY" = "$PRESET_LLM_VERBOSITY" ] || LLM_VERBOSITY="$CLI_LLM_VERBOSITY"
   [ "$CLI_PROMPT_FILE" = "$PRESET_PROMPT_FILE" ] || PROMPT_FILE="$CLI_PROMPT_FILE"
 
   [ "$CLI_KEEP_INTERMEDIATE_SRTS" -eq 0 ] || KEEP_INTERMEDIATE_SRTS=1
@@ -1495,7 +1573,8 @@ fi
 log "Cartella di lavoro: $WORKDIR"
 [ -n "$COOKIES_FROM_BROWSER" ] && log "Cookies browser abilitati per yt-dlp: $COOKIES_FROM_BROWSER"
 log "Modalità ytdlp: $YTDLP_MODE"
-log "Verbosity: $VERBOSITY"
+log "Script verbosity: $SCRIPT_VERBOSITY"
+log "LLM verbosity: $LLM_VERBOSITY"
 
 step_download_video
 step_download_subs

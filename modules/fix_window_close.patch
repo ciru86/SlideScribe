@@ -1,0 +1,38 @@
+--- Screenshot_grabber.py
++++ Screenshot_grabber.py
+@@
+ def ensure_dir(path: str) -> None:
+     os.makedirs(path, exist_ok=True)
++
++
++def close_cv_window(window_title=None):
++    """
++    Forza la chiusura immediata delle finestre OpenCV (workaround macOS)
++    """
++    try:
++        if window_title:
++            cv2.destroyWindow(window_title)
++        else:
++            cv2.destroyAllWindows()
++    except cv2.error:
++        pass
++
++    for _ in range(8):
++        cv2.waitKey(1)
+
+@@
+-    roi = cv2.selectROI(window_title, display, fromCenter=False, showCrosshair=True)
+-    cv2.destroyWindow(window_title)
++    roi = cv2.selectROI(window_title, display, fromCenter=False, showCrosshair=True)
++    close_cv_window(window_title)
+
+@@
+-        elif key == 27:
+-            cv2.destroyWindow(window_title)
++        elif key == 27:
++            close_cv_window(window_title)
+             raise RuntimeError("Selezione quadrilatero annullata.")
+
+@@
+-    cv2.destroyWindow(window_title)
++    close_cv_window(window_title)
