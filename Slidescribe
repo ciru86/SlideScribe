@@ -1019,8 +1019,9 @@ resolve_inputs() {
   if [ "$SKIP_DOWNLOAD" -eq 0 ] || [ "$SKIP_SUBS" -eq 0 ]; then
     if [ -z "$YOUTUBE_URL" ]; then
       YOUTUBE_URL="$(prompt_nonempty 'Inserisci URL video YouTube: ')"
+    fi
   fi
-  
+
   if [ -z "$VIDEO_BASENAME" ]; then
       VIDEO_BASENAME="$(basename "$WORKDIR")"
   fi
@@ -1702,8 +1703,6 @@ run_llm_pipeline() {
     chatgpt_cmd+=("$PROMPT_TEXT")
 
     run_chatgpt_cmd_with_retry "$CHATGPT_RUN_STDERR" "${chatgpt_cmd[@]}"
-
-    fi
 
     require_file "$corrected_file"
     log "Chunk corretto salvato: $corrected_file"
