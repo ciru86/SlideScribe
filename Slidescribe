@@ -480,7 +480,9 @@ Puoi modificare SOLO il testo sotto \`TEXT:\` per:
 - correggere termini tecnici
 - migliorare punteggiatura e leggibilità
 - riformulare frasi poco naturali o troppo orali in un italiano più chiaro e scorrevole
-- eliminare ripetizioni inutili o piccoli inciampi tipici del parlato, purché il significato resti invariato${terminology_section}
+- eliminare ripetizioni inutili o piccoli inciampi tipici del parlato, purché il significato resti invariato
+
+${terminology_section}
 
 Importante:
 - il chunk può iniziare o finire nel mezzo di un discorso
@@ -1017,11 +1019,10 @@ resolve_inputs() {
   if [ "$SKIP_DOWNLOAD" -eq 0 ] || [ "$SKIP_SUBS" -eq 0 ]; then
     if [ -z "$YOUTUBE_URL" ]; then
       YOUTUBE_URL="$(prompt_nonempty 'Inserisci URL video YouTube: ')"
-    fi
   fi
-
+  
   if [ -z "$VIDEO_BASENAME" ]; then
-    VIDEO_BASENAME="$(prompt_nonempty 'Come vuoi chiamare il video finale (senza estensione)? ')"
+      VIDEO_BASENAME="$(basename "$WORKDIR")"
   fi
 
   if [ "$SKIP_SCREENSHOTS" -eq 0 ] && [ -z "$ROI_MODE" ]; then
