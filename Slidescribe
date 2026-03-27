@@ -35,6 +35,7 @@ set -euo pipefail
 # Vengono risolti rispetto alla cartella dello script principale.
 SCREENSHOT_SCRIPT="modules/Screenshot_grabber.py"
 EXPORT_SCRIPT="modules/export_for_llm.py"
+DEDUP_SCRIPT="modules/srt_to_text_dedup.py"
 IMPORT_SCRIPT="modules/import_corrected_for_pdf_docx.py"
 PDF_SCRIPT="modules/slides_and_texts_to_pdf.py"
 
@@ -104,6 +105,7 @@ ENHANCE_PRESET=""
 
 # Parametri principali di input / contenuto.
 WORKDIR=""
+OUTPUT_BASE="$SCRIPT_DIR/output"
 YOUTUBE_URL=""
 VIDEO_BASENAME=""
 LESSON_TOPIC=""
@@ -145,6 +147,7 @@ QUIET_LOGS=0
 # -----------------------------
 PROMPT_TEXT=""
 DOWNLOADED_SRT=""
+AUTO_METADATA_ENABLED=1
 SCREENSHOTS_NEEDED=1
 LLM_PIPELINE_NEEDED=1
 PDF_NEEDED=1
@@ -260,235 +263,170 @@ prompt_optional() {
     return 0
   fi
 
-  printf "%s " "$message" > /dev/tty
+  printf "%s" "$message" > /dev/tty
   IFS= read -r value < /dev/tty
   value="$(trim "$value")"
-  printf '%s\n' "$value"
+  printf '%s' "$value"
 }
 
 prompt_choice_roi() {
-  # Prompt guidato per la modalità ROI.
-  # Accetta shared/separate oppure 1/2.
+  # Chiede la modalità ROI in forma guidata.
+  # Restituisce "shared" oppure "separate".
   local value=""
 
   if [ "$NON_INTERACTIVE" -eq 1 ]; then
-    die "ROI mode mancante in modalità --non-interactive"
+    die "ROI_MODE mancante in modalità --non-interactive"
   fi
 
   while true; do
-    printf "Seleziona modalità ROI (shared = Slide Area e Trigger Area uguali e rettangolari, separate = Slide Area ≠ Trigger Area e Slide Area poligonale): " > /dev/tty
+    cat > /dev/tty <<'EOF'
+Scegli la modalità ROI:
+  1) shared   - stessa area per trigger e slide (rettangolare)
+  2) separate - trigger separato + area slide poligonale
+EOF
+    printf "Scelta [1/2]: " > /dev/tty
     IFS= read -r value < /dev/tty
     value="$(trim "$value")"
+
     case "$value" in
-      shared|separate)
-        printf '%s' "$value"
-        return 0
-        ;;
-      1)
+      1|shared)
         printf 'shared'
         return 0
         ;;
-      2)
+      2|separate)
         printf 'separate'
         return 0
         ;;
       *)
-        echo "Devi digitare shared oppure separate (accettati anche 1/2)." > /dev/tty
+        echo "Scelta non valida. Riprova." > /dev/tty
         ;;
     esac
   done
 }
 
 usage() {
-  # Help sintetico da riga di comando.
-  cat <<'EOF'
+  cat <<EOF
 Uso:
-  Slidescribe.sh [opzioni]
+  $SCRIPT_NAME [opzioni]
 
-Input principali:
-  --workdir PATH
-  --youtube-url URL
-  --video-basename NAME
-  --lesson-topic TEXT
-  --terminology-context TEXT
-  --terminology-file FILE
-  --prompt-file FILE
-  --sub-langs "it,it-IT,it.*,ita"
+Opzioni principali:
+  --workdir PATH                 Cartella di lavoro (relativa a $OUTPUT_BASE se non assoluta)
+  --youtube-url URL              URL del video YouTube
+  --video-basename NAME          Nome base del video/file output (senza estensione)
+  --lesson-topic TEXT            Argomento della lezione (override manuale)
+  --terminology-context TEXT     Contesto terminologico (override manuale)
+  --terminology-file FILE        File testo con glossario/terminologia da anteporre al contesto
+  --roi-mode MODE                shared | separate
+  --enhance-slide                Abilita enhancement screenshot
+  --enhance-preset PRESET        mild | medium | strong
+  --chunk-size N                 Numero slide per chunk LLM
+  --sub-langs LIST               Lingue sottotitoli per yt-dlp
+  --ytdlp-mode MODE              auto | system | fallback
+  --cookies-from-browser NAME    Passa --cookies-from-browser a yt-dlp
+  --model NAME                   Modello del wrapper chatgpt
+  --temperature FLOAT            Temperatura del wrapper chatgpt
+  --max-output-tokens N          Max output tokens del wrapper chatgpt
+  --effort VALUE                 Effort del wrapper chatgpt
+  --verbosity LEVEL              quiet | normal | verbose | debug
+  --script-verbosity LEVEL       Alias di --verbosity
+  --llm-verbosity LEVEL          low | medium | high
+  --prompt-file FILE             Prompt custom completo al posto del built-in
+  --config                       Usa il config di default: config/slidescribe.conf
+  --config-file FILE             Usa un config file esplicito
 
-Modalità operative:
-  --roi-mode shared|separate
-  --enhance-slide
-  --enhance-preset mild|medium|strong
-  --ytdlp-mode auto|system|fallback
-  --cookies-from-browser BROWSER
-  --non-interactive
-  --dry-run
-  --from-step screenshots|llm|pdf
-  --skip-download
-  --skip-subs
-  --skip-screenshots
-  --skip-llm
-  --skip-pdf
-  --force-all
-
-LLM:
-  --model NAME
-  --temperature FLOAT
-  --max-output-tokens N
-  --effort VALUE
-  --llm-verbosity low|medium|high
-  --chunk-size N
-
-Logging script:
-  --verbosity quiet|normal|verbose|debug
+Controllo pipeline:
+  --skip-download                Salta download video
+  --skip-subs                    Salta download sottotitoli
+  --skip-screenshots             Salta Screenshot_grabber
+  --skip-llm                     Salta pipeline LLM
+  --skip-pdf                     Salta generazione PDF/DOCX
+  --from-step STEP               screenshots | llm | pdf
+  --force-all                    Riesegue anche step con checkpoint già presenti
 
 Conservazione / debug:
-  --keep-intermediate-srts
-  --keep-raw-json
-  --keep-temp
-
-Config:
-  --config [usa il default config/slidescribe.conf]
-  --config-file FILE
-
-Altre:
-  -h, --help
-  --manual
-
-Esempi:
-  Slidescribe.sh \
-    --workdir ~/Desktop/lezione1 \
-    --youtube-url "https://www.youtube.com/watch?v=..." \
-    --video-basename "lezione1" \
-    --lesson-topic "OSAS, MAD, CPAP" \
-    --terminology-file ~/glossari/osas.txt \
-    --roi-mode separate
-
-  Slidescribe.sh --config --temperature 0.5 --verbosity debug
-  Slidescribe.sh --config-file run.conf --from-step llm --force-all
-  Slidescribe.sh --config-file run.conf --non-interactive --dry-run
-
-Per una descrizione completa delle interazioni tra flag, usa:
-  Slidescribe.sh --manual
+  --keep-intermediate-srts       Non elimina SRT intermedi
+  --keep-raw-json                Salva raw JSON del wrapper chatgpt
+  --keep-temp                    Conserva eventuali temporanei futuri
+  --non-interactive              Non fare domande interattive
+  --dry-run                      Mostra config e piano senza eseguire
+  --manual                       Manuale esteso
+  -h, --help                     Aiuto breve
 EOF
 }
 
 manual() {
-  # Manuale esteso: spiega la logica della pipeline.
   cat <<'EOF'
-MANUALE
-========
+MANUALE - Slidescribe
 
-1) PRECEDENZA CONFIGURAZIONE
-   CLI flags > --config FILE > default interni > prompt interattivo
+1) SCOPO
+   Orchestrare una pipeline che:
+   - scarica un video YouTube
+   - scarica i sottotitoli automatici
+   - estrae screenshot delle slide
+   - esporta testo+slide in chunk per LLM
+   - ripulisce i chunk via wrapper chatgpt
+   - reimporta e produce PDF/DOCX finali
 
-   Esempio:
-     nel config hai TEMPERATURE="0.3"
-     da CLI passi --temperature 0.6
-     risultato finale: 0.6
+2) ORDINE DI PRECEDENZA CONFIGURAZIONE
+   1. flag CLI
+   2. file config
+   3. default interni
+   4. prompt interattivi
 
-2) INTERATTIVITÀ
-   - Senza --non-interactive, i parametri mancanti vengono chiesti a terminale.
-   - Con --non-interactive, i parametri obbligatori mancanti causano errore.
+3) CONFIG DI DEFAULT
+   --config usa automaticamente:
+     config/slidescribe.conf
 
-3) --prompt-file
-   Sostituisce completamente il prompt LLM built-in.
-   Non lo estende. Non viene fuso con il prompt standard.
+4) PROMPT LLM
+   - Se usi --prompt-file, il prompt built-in viene completamente sostituito.
+   - Se NON usi --prompt-file, il prompt built-in viene costruito da:
+     LESSON_TOPIC + TERMINOLOGY_CONTEXT
+   - Se LESSON_TOPIC / TERMINOLOGY_CONTEXT sono vuoti, lo script prova a inferirli
+     automaticamente da raw_text.txt ottenuto con dedup dell'SRT.
 
-4) --terminology-context e --terminology-file
-   Possono convivere.
-   Se presenti entrambi:
-     - il file viene letto come base
-     - il testo inline viene aggiunto in fondo
+5) INFERENZA AUTOMATICA CONTESTO LEZIONE
+   Dopo Screenshot_grabber e prima di export_for_llm:
+   - viene creato WORKDIR/llm-text/raw_text.txt
+   - viene caricato al wrapper chatgpt
+   - viene salvata la risposta in WORKDIR/llm-text/lesson_context.txt
+   - si prova a estrarre:
+       [[Argomento lezione: ...]]
+       {{Terminologia: ...}}
+   - se parsing o inferenza falliscono, si ricade sul prompt generico
 
-5) --from-step
-   Definisce il punto di partenza della pipeline:
-     screenshots  = pipeline completa dal task screenshot in avanti
-     llm          = salta download/sottotitoli/screenshots e parte dalla pipeline LLM
-     pdf          = salta tutto e parte solo dalla generazione PDF/DOCX
+6) YT-DLP
+   Modalità supportate:
+   - auto     : prova yt-dlp di sistema, poi fallback
+   - system   : usa solo yt-dlp nel PATH
+   - fallback : usa solo ~/.local/bin/yt-dlp
 
-   Equivalenze logiche:
-     --from-step llm  => skip download + skip subs + skip screenshots
-     --from-step pdf  => skip download + skip subs + skip screenshots + skip llm
+7) ROI MODE
+   shared:
+     una sola area rettangolare condivisa
+   separate:
+     trigger separato + area slide poligonale
 
-6) --skip-*
-   Rimuove singoli step dal piano di esecuzione.
+8) ESEMPIO MINIMO
+   ./slidescribe.sh --config --workdir lezione1 --youtube-url "https://..." --video-basename lezione1
 
-   Esempi:
-     --skip-pdf       = esegue pipeline fino al JSON finale, ma non genera PDF/DOCX
-     --skip-llm       = non esegue correzione LLM/import; utile solo se esiste già il JSON finale
+9) ESEMPIO DA STEP LLM
+   ./slidescribe.sh --config --workdir lezione1 --video-basename lezione1 --from-step llm
 
-7) INTERAZIONI TRA --from-step, --skip-*, --force-all
-   Ordine concettuale:
-     a) --from-step definisce il perimetro iniziale
-     b) --skip-* rimuove step dal perimetro
-     c) --force-all forza la riesecuzione degli step rimasti nel perimetro
+10) ESEMPIO SOLO PDF
+   ./slidescribe.sh --config --workdir lezione1 --video-basename lezione1 --from-step pdf
 
-   Esempi validi:
-     --from-step llm --force-all
-       -> rifà LLM + PDF anche se esistono checkpoint
+11) FILE / CARTELLE CHIAVE
+   output/<workdir>/
+     <basename>.mkv
+     <basename>.original.srt
+     <basename> slides/
+     llm-text/
+     llm_chunks/
+     llm_corrected/
+     llm_merged/
+     logs/
 
-     --from-step llm --skip-pdf
-       -> rifà solo LLM, non il PDF
-
-   Esempi invalidi:
-     --from-step llm --skip-llm
-     --from-step pdf --skip-pdf
-
-8) --force-all
-   Ignora i checkpoint degli step ATTIVI.
-   Non riattiva step esclusi da --from-step o --skip-*.
-
-9) YT-DLP MODE
-   auto      = prova yt-dlp in PATH; se fallisce, prova fallback ~/.local/bin/yt-dlp
-   system    = usa solo yt-dlp in PATH; nessun fallback
-   fallback  = usa direttamente ~/.local/bin/yt-dlp
-
-10) --cookies-from-browser BROWSER
-   Aggiunge --cookies-from-browser <BROWSER> al comando yt-dlp selezionato.
-   Esempi: Safari, Brave, Firefox
-
-10b) ENHANCE SCREENSHOT
-   --enhance-slide
-     abilita il miglioramento automatico delle slide nel modulo Screenshot_grabber.py
-
-   --enhance-preset mild|medium|strong
-     seleziona l'intensità del miglioramento
-     richiede --enhance-slide
-
-11) SCRIPT VERBOSITY
-   Controlla solo i log dello script bash:
-   quiet   = output minimo
-   normal  = log standard
-   verbose = log standard + output live dei task principali
-   debug   = verbose + messaggi diagnostici extra
-
-12) LLM VERBOSITY
-   Controlla solo la verbosità del client chatgpt.
-   Valori tipici: low | medium | high
-
-13) CONFIG FILE
-   Formato consigliato: shell-compatible .conf
-
-   Esempio:
-     WORKDIR="/Users/corax/Desktop/lezione1"
-     YOUTUBE_URL="https://www.youtube.com/watch?v=..."
-     YTDLP_MODE="auto"
-     SUB_LANGS="it,it-IT,it.*,ita"
-     VIDEO_BASENAME="lezione1"
-     LESSON_TOPIC="OSAS, MAD, CPAP"
-     TERMINOLOGY_FILE="/Users/corax/glossari/osas.txt"
-     ROI_MODE="shared"
-     CHUNK_SIZE="20"
-     MODEL="gpt-5.4"
-     TEMPERATURE="0.3"
-     MAX_OUTPUT_TOKENS="70000"
-     EFFORT=""
-     VERBOSITY="normal"
-     COOKIES_FROM_BROWSER="Safari"
-     KEEP_RAW_JSON="1"
-
-14) DRY RUN
+12) DRY RUN
    Risolve configurazione, controlla coerenza, stampa il piano di esecuzione e termina.
 EOF
 }
@@ -557,6 +495,64 @@ Restituisci esclusivamente il testo corretto nello stesso identico formato ricev
 EOF
 }
 
+build_lesson_metadata_prompt() {
+  # Prompt dedicato all'inferenza di argomento lezione e terminologia
+  # a partire da un TXT deduplicato derivato dall'SRT originale.
+  cat <<'EOF'
+Sei un assistente esperto nell’analisi di trascrizioni automatiche (speech-to-text) contenenti errori, distorsioni e termini tecnici mal riconosciuti.
+
+OBIETTIVO:
+Ricostruire il contenuto reale della lezione e il dominio tecnico trattato, ignorando errori e rumore del testo.
+
+TASK:
+1) Inferisci l’argomento principale della lezione anche se il testo contiene errori o parole distorte.
+2) Identifica le 20 parole chiave tecniche più rilevanti per l’argomento.
+   - Le parole chiave NON devono necessariamente essere presenti nel testo.
+   - Devono rappresentare correttamente il dominio tecnico della lezione.
+   - Correggi mentalmente eventuali termini malformati.
+
+REGOLE:
+- Argomento lezione: massimo 2-3 frasi.
+- Terminologia: esattamente 20 keyword.
+- Keyword tecniche, specifiche e coerenti.
+- Una sola riga, separate da virgole.
+- Nessun testo extra.
+- Nessuna introduzione, spiegazione o conclusione.
+
+FORMATO OUTPUT OBBLIGATORIO:
+[[Argomento lezione: testo]]
+{{Terminologia: keyword1, keyword2, keyword3, ..., keyword20}}
+EOF
+}
+
+merge_terminology_sources() {
+  # Integra nel contesto terminologico eventuale file esterno passato
+  # via --terminology-file, anteponendolo al contesto già presente.
+  if [ -n "$TERMINOLOGY_FILE" ]; then
+    local terminology_file_content
+    terminology_file_content="$(cat "$TERMINOLOGY_FILE")"
+    if [ -n "$TERMINOLOGY_CONTEXT" ]; then
+      TERMINOLOGY_CONTEXT="${terminology_file_content}
+
+${TERMINOLOGY_CONTEXT}"
+    else
+      TERMINOLOGY_CONTEXT="$terminology_file_content"
+    fi
+  fi
+}
+
+refresh_prompt_text() {
+  # Rigenera PROMPT_TEXT dopo che LESSON_TOPIC e/o TERMINOLOGY_CONTEXT
+  # sono stati eventualmente inferiti in automatico.
+  merge_terminology_sources
+
+  if [ -n "$PROMPT_FILE" ]; then
+    PROMPT_TEXT="$(cat "$PROMPT_FILE")"
+  else
+    PROMPT_TEXT="$(build_llm_prompt "$LESSON_TOPIC" "$TERMINOLOGY_CONTEXT")"
+  fi
+}
+
 extract_json_field_with_python() {
   # Estrae da una stringa JSON il valore di una certa chiave usando python3.
   # Viene usato, per esempio, per recuperare il file_id dall'upload verso ChatGPT.
@@ -574,6 +570,41 @@ except Exception:
 value = data.get(field, "")
 if isinstance(value, str):
     print(value)
+PY
+}
+
+extract_lesson_metadata_field() {
+  # Estrae dal file di risposta LLM il contenuto dei campi:
+  # [[Argomento lezione: ...]]
+  # {{Terminologia: ...}}
+  local response_file="$1"
+  local field="$2"
+
+  "$VENV_PYTHON" - "$response_file" "$field" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+field = sys.argv[2]
+text = path.read_text(encoding="utf-8", errors="replace")
+
+patterns = {
+    "lesson_topic": r"\[\[\s*Argomento lezione:\s*(.*?)\s*\]\]",
+    "terminology_context": r"\{\{\s*Terminologia:\s*(.*?)\s*\}\}",
+}
+
+pattern = patterns.get(field)
+if not pattern:
+    sys.exit(2)
+
+m = re.search(pattern, text, re.S)
+if not m:
+    sys.exit(1)
+
+value = m.group(1).strip()
+value = re.sub(r"\s+", " ", value)
+print(value)
 PY
 }
 
@@ -909,13 +940,6 @@ normalize_and_validate_args() {
     die "--enhance-preset richiede --enhance-slide"
   fi
 
-  # Nota: qui nel sorgente originale c'è un controllo probabilmente errato.
-  # ENHANCE_MODE non viene definita altrove. Lo mantengo per fedeltà, ma
-  # logicamente dovrebbe quasi certamente essere rimosso o corretto.
-  if [ -n "$ENHANCE_PRESET" ] && [ -z "$ENHANCE_MODE" ]; then
-    die "--enhance-preset richiede --enhance"
-  fi
-
   if [ -n "$FROM_STEP" ]; then
     case "$FROM_STEP" in
       screenshots|llm|pdf) ;;
@@ -982,6 +1006,11 @@ resolve_inputs() {
     WORKDIR="${WORKDIR//\\ / }"
   fi
 
+  WORKDIR="$(trim "$WORKDIR")"
+  if [[ "$WORKDIR" != /* ]]; then
+    WORKDIR="$OUTPUT_BASE/$WORKDIR"
+  fi
+
   mkdir -p "$WORKDIR"
   WORKDIR="$(cd "$WORKDIR" && pwd)"
 
@@ -995,37 +1024,14 @@ resolve_inputs() {
     VIDEO_BASENAME="$(prompt_nonempty 'Come vuoi chiamare il video finale (senza estensione)? ')"
   fi
 
-  if [ -z "$LESSON_TOPIC" ]; then
-    LESSON_TOPIC="$(prompt_optional "Inserisci l'argomento della lezione (lascia vuoto per usare la versione generica del prompt):")"
-  fi
-
-  if [ -z "$TERMINOLOGY_CONTEXT" ] && [ -z "$TERMINOLOGY_FILE" ]; then
-    TERMINOLOGY_CONTEXT="$(prompt_optional "Inserisci il contesto terminologico, se utile (lascia vuoto per omettere l'intera sezione):")"
-  fi
-
   if [ "$SKIP_SCREENSHOTS" -eq 0 ] && [ -z "$ROI_MODE" ]; then
     ROI_MODE="$(prompt_choice_roi)"
   fi
 
-  # Se esiste un file terminologico, ne incorpora il contenuto nel contesto.
-  if [ -n "$TERMINOLOGY_FILE" ]; then
-    local terminology_file_content
-    terminology_file_content="$(cat "$TERMINOLOGY_FILE")"
-    if [ -n "$TERMINOLOGY_CONTEXT" ]; then
-      TERMINOLOGY_CONTEXT="${terminology_file_content}
-
-${TERMINOLOGY_CONTEXT}"
-    else
-      TERMINOLOGY_CONTEXT="$terminology_file_content"
-    fi
-  fi
-
-  # Prompt custom oppure prompt built-in generato dinamicamente.
-  if [ -n "$PROMPT_FILE" ]; then
-    PROMPT_TEXT="$(cat "$PROMPT_FILE")"
-  else
-    PROMPT_TEXT="$(build_llm_prompt "$LESSON_TOPIC" "$TERMINOLOGY_CONTEXT")"
-  fi
+  # LESSON_TOPIC e TERMINOLOGY_CONTEXT restano opzionali:
+  # se vuoti verranno inferiti automaticamente dal testo deduplicato.
+  LESSON_TOPIC="$(trim "$LESSON_TOPIC")"
+  TERMINOLOGY_CONTEXT="$(trim "$TERMINOLOGY_CONTEXT")"
 }
 
 setup_paths() {
@@ -1042,17 +1048,26 @@ setup_paths() {
   FINAL_PDF="${WORKDIR}/${VIDEO_BASENAME}.pdf"
   FINAL_DOCX="${WORKDIR}/${VIDEO_BASENAME}.docx"
 
+  LLM_TEXT_DIR="${WORKDIR}/llm-text"
+  RAW_TEXT_PATH="${LLM_TEXT_DIR}/raw_text.txt"
+  LESSON_CONTEXT_OUTPUT="${LLM_TEXT_DIR}/lesson_context.txt"
+  LESSON_CONTEXT_RAW_JSON="${LLM_TEXT_DIR}/lesson_context.raw.json"
+
   LLM_CHUNKS_DIR="${WORKDIR}/llm_chunks"
   LLM_CORRECTED_DIR="${WORKDIR}/llm_corrected"
   LLM_MERGED_DIR="${WORKDIR}/llm_merged"
   MERGED_SLIDE_TEXTS_JSON="${LLM_MERGED_DIR}/${VIDEO_BASENAME}.slide_texts.json"
 
   LOG_DIR="${WORKDIR}/logs"
-  mkdir -p "$LOG_DIR" "$LLM_CHUNKS_DIR" "$LLM_CORRECTED_DIR" "$LLM_MERGED_DIR"
+  mkdir -p "$LOG_DIR" "$LLM_TEXT_DIR" "$LLM_CHUNKS_DIR" "$LLM_CORRECTED_DIR" "$LLM_MERGED_DIR"
 
   # Log separati per ogni modulo/fase.
   SCREENSHOT_STDOUT="${LOG_DIR}/screenshot.stdout.log"
   SCREENSHOT_STDERR="${LOG_DIR}/screenshot.stderr.log"
+  DEDUP_STDOUT="${LOG_DIR}/dedup.stdout.log"
+  DEDUP_STDERR="${LOG_DIR}/dedup.stderr.log"
+  LESSON_CONTEXT_UPLOAD_STDERR="${LOG_DIR}/lesson_context_upload.stderr.log"
+  LESSON_CONTEXT_RUN_STDERR="${LOG_DIR}/lesson_context_run.stderr.log"
   EXPORT_STDOUT="${LOG_DIR}/export.stdout.log"
   EXPORT_STDERR="${LOG_DIR}/export.stderr.log"
   CHATGPT_UPLOAD_STDERR="${LOG_DIR}/chatgpt_upload.stderr.log"
@@ -1174,15 +1189,47 @@ validate_youtube_url() {
 }
 
 run_chatgpt_upload() {
-  # Carica un file chunk verso il wrapper chatgpt.
+  # Carica un file verso il wrapper chatgpt.
   # Restituisce su stdout il JSON di risposta del wrapper.
-  local chunk_file="$1"
+  local input_file="$1"
+  local stderr_log="${2:-$CHATGPT_UPLOAD_STDERR}"
 
   if [ "$VERBOSE_LOGS" -eq 1 ]; then
-    chatgpt --upload-file "$chunk_file" 2> >(tee -a "$CHATGPT_UPLOAD_STDERR" >&2)
+    chatgpt --upload-file "$input_file" 2> >(tee -a "$stderr_log" >&2)
   else
-    chatgpt --upload-file "$chunk_file" 2>>"$CHATGPT_UPLOAD_STDERR"
+    chatgpt --upload-file "$input_file" 2>>"$stderr_log"
   fi
+}
+
+run_chatgpt_cmd_with_retry() {
+  local stderr_log="$1"
+  shift
+  local max_attempts=3
+  local attempt=1
+  local rc=0
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    log "Tentativo ChatGPT ${attempt}/${max_attempts}..."
+
+    set +e
+    if [ "$VERBOSE_LOGS" -eq 1 ]; then
+      "$@" 2> >(tee -a "$stderr_log" >&2)
+    else
+      "$@" 2>>"$stderr_log"
+    fi
+    rc=$?
+    set -e
+
+    if [ "$rc" -eq 0 ]; then
+      return 0
+    fi
+
+    warn "Chiamata ChatGPT fallita al tentativo ${attempt} (exit ${rc})"
+    attempt=$((attempt + 1))
+    [ "$attempt" -le "$max_attempts" ] && sleep 3
+  done
+
+  return "$rc"
 }
 
 check_dependencies() {
@@ -1196,6 +1243,7 @@ check_dependencies() {
   require_file "$VENV_PYTHON"
   require_file "${SCRIPT_DIR}/${SCREENSHOT_SCRIPT}"
   require_file "${SCRIPT_DIR}/${EXPORT_SCRIPT}"
+  require_file "${SCRIPT_DIR}/${DEDUP_SCRIPT}"
   require_file "${SCRIPT_DIR}/${IMPORT_SCRIPT}"
   require_file "${SCRIPT_DIR}/${PDF_SCRIPT}"
 
@@ -1249,6 +1297,7 @@ WORKDIR="$WORKDIR"
 YOUTUBE_URL="$YOUTUBE_URL"
 VIDEO_BASENAME="$VIDEO_BASENAME"
 LESSON_TOPIC="$LESSON_TOPIC"
+TERMINOLOGY_CONTEXT="$TERMINOLOGY_CONTEXT"
 TERMINOLOGY_FILE="$TERMINOLOGY_FILE"
 ROI_MODE="$ROI_MODE"
 ENHANCE_SLIDE="$ENHANCE_SLIDE"
@@ -1296,9 +1345,16 @@ EOF
 ensure_prerequisites_for_skips() {
   # Se l'utente skippa uno step, verifica che i suoi output di input
   # esistano davvero. Altrimenti la pipeline sarebbe inconsistente.
+
   if [ "$SKIP_SCREENSHOTS" -eq 1 ]; then
     [ -d "$SLIDES_DIR" ] || die "Hai skippato gli screenshot ma la cartella slide non esiste: $SLIDES_DIR"
     [ -f "${SLIDES_DIR}/slides.csv" ] || die "Hai skippato gli screenshot ma manca slides.csv: ${SLIDES_DIR}/slides.csv"
+  fi
+
+  # L'SRT originale deve esistere già solo se stai saltando lo step
+  # che dovrebbe produrlo.
+  if [ "$SKIP_SUBS" -eq 1 ] && [ "$SKIP_LLM" -eq 0 ]; then
+    [ -f "$ORIGINAL_SRT" ] || die "Hai skippato i sottotitoli ma manca l'SRT originale richiesto dalla pipeline LLM: $ORIGINAL_SRT"
   fi
 
   if [ "$SKIP_LLM" -eq 1 ]; then
@@ -1412,8 +1468,140 @@ task_screenshots() {
   [ -s "${SLIDES_DIR}/slides.csv" ] || die "Screenshot_grabber terminato ma slides.csv è vuoto: ${SLIDES_DIR}/slides.csv"
 }
 
+prepare_lesson_context_from_srt() {
+  # 1) Deduplica l'SRT originale in raw_text.txt
+  # 2) Se LESSON_TOPIC e TERMINOLOGY_CONTEXT sono entrambi vuoti,
+  #    prova a inferirli automaticamente via chatgpt
+  # 3) In ogni caso rigenera PROMPT_TEXT finale
+  local metadata_prompt=""
+  local upload_json=""
+  local file_id=""
+  local inferred_lesson_topic=""
+  local inferred_terminology_context=""
+  local -a chatgpt_cmd
+
+  require_file "$ORIGINAL_SRT"
+
+  if [ "$FORCE_ALL" -eq 1 ] || [ ! -s "$RAW_TEXT_PATH" ]; then
+    log "Avvio deduplicazione SRT -> raw_text.txt..."
+    run_logged_command "$DEDUP_STDOUT" "$DEDUP_STDERR" 1 \
+      "$VENV_PYTHON" "${SCRIPT_DIR}/${DEDUP_SCRIPT}" \
+      --srt "$ORIGINAL_SRT" \
+      --output "$RAW_TEXT_PATH"
+  else
+    log "raw_text.txt già presente, skip dedup: $RAW_TEXT_PATH"
+  fi
+
+  require_file "$RAW_TEXT_PATH"
+
+  if [ -n "$LESSON_TOPIC" ] || [ -n "$TERMINOLOGY_CONTEXT" ]; then
+    log "Metadati lezione già forniti manualmente in tutto o in parte: salto inferenza automatica"
+    refresh_prompt_text
+    return 0
+  fi
+
+  if [ "$FORCE_ALL" -eq 1 ] || [ ! -s "$LESSON_CONTEXT_OUTPUT" ]; then
+    log "Upload raw_text.txt a ChatGPT per inferenza argomento/terminologia..."
+    upload_json="$(run_chatgpt_upload "$RAW_TEXT_PATH" "$LESSON_CONTEXT_UPLOAD_STDERR")"
+    file_id="$(extract_json_field_with_python "$upload_json" "id")"
+    [ -n "$file_id" ] || {
+      warn "Impossibile estrarre file_id per inferenza automatica del contesto. Uso prompt generico."
+      refresh_prompt_text
+      return 0
+    }
+
+    metadata_prompt="$(build_lesson_metadata_prompt)"
+
+    chatgpt_cmd=(
+      chatgpt
+      --no-resume
+      -o "$LESSON_CONTEXT_OUTPUT"
+      --file-id "$file_id"
+      -m "$MODEL"
+      -t "$TEMPERATURE"
+      --verbosity "$LLM_VERBOSITY"
+    )
+
+    if [ -n "$MAX_OUTPUT_TOKENS" ]; then
+      chatgpt_cmd+=(-k "$MAX_OUTPUT_TOKENS")
+    fi
+
+    if [ -n "$EFFORT" ]; then
+      chatgpt_cmd+=(--effort "$EFFORT")
+    fi
+
+    if [ "$KEEP_RAW_JSON" -eq 1 ]; then
+      chatgpt_cmd+=(--save-raw "$LESSON_CONTEXT_RAW_JSON")
+    fi
+     
+    chatgpt_cmd+=("$metadata_prompt")
+
+    log "Invio prompt di inferenza metadata lezione..."
+
+    run_chatgpt_cmd_with_retry "$LESSON_CONTEXT_RUN_STDERR" "${chatgpt_cmd[@]}"
+
+  else
+    log "Risposta metadata già presente, skip inferenza: $LESSON_CONTEXT_OUTPUT"
+  fi
+
+  if [ -s "$LESSON_CONTEXT_OUTPUT" ]; then
+    inferred_lesson_topic="$(extract_lesson_metadata_field "$LESSON_CONTEXT_OUTPUT" lesson_topic 2>/dev/null || true)"
+    inferred_terminology_context="$(extract_lesson_metadata_field "$LESSON_CONTEXT_OUTPUT" terminology_context 2>/dev/null || true)"
+
+    if [ -n "$inferred_lesson_topic" ]; then
+      LESSON_TOPIC="$inferred_lesson_topic"
+      log "Argomento lezione inferito automaticamente."
+    else
+      warn "Parsing argomento lezione fallito: uso prompt generico."
+    fi
+
+    if [ -n "$inferred_terminology_context" ]; then
+      TERMINOLOGY_CONTEXT="$inferred_terminology_context"
+      log "Terminologia inferita automaticamente."
+    else
+      warn "Parsing terminologia fallito: procedo senza contesto terminologico automatico."
+    fi
+  else
+    warn "Output metadata non disponibile o vuoto: uso prompt generico."
+  fi
+
+  refresh_prompt_text
+}
+
+run_chatgpt_cmd_with_retry() {
+  local stderr_log="$1"
+  shift
+  local max_attempts=3
+  local attempt=1
+  local rc=0
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    log "Tentativo ChatGPT ${attempt}/${max_attempts}..."
+
+    set +e
+    if [ "$VERBOSE_LOGS" -eq 1 ]; then
+      "$@" 2> >(tee -a "$stderr_log" >&2)
+    else
+      "$@" 2>>"$stderr_log"
+    fi
+    rc=$?
+    set -e
+
+    if [ "$rc" -eq 0 ]; then
+      return 0
+    fi
+
+    warn "Chiamata ChatGPT fallita al tentativo ${attempt} (exit ${rc})"
+    attempt=$((attempt + 1))
+    [ "$attempt" -le "$max_attempts" ] && sleep 3
+  done
+
+  return "$rc"
+}
+
 run_llm_pipeline() {
   # Pipeline completa di correzione testi:
+  # 0) dedup SRT e inferenza automatica contesto lezione
   # 1) export slide+testo in chunk
   # 2) upload chunk a ChatGPT
   # 3) salvataggio chunk corretti
@@ -1441,6 +1629,9 @@ run_llm_pipeline() {
   require_file "$slides_csv"
   require_file "$ORIGINAL_SRT"
 
+  prepare_lesson_context_from_srt
+  [ -n "$PROMPT_TEXT" ] || die "PROMPT_TEXT vuoto dopo la preparazione del contesto lezione"
+
   log "Avvio export_for_llm.py..."
   if [ "$VERBOSE_LOGS" -eq 1 ]; then
     run_logged_command "$EXPORT_STDOUT" "$EXPORT_STDERR" 1 \
@@ -1464,7 +1655,6 @@ run_llm_pipeline() {
   [ -n "$expected_slides" ] || die "Impossibile contare le slide da $slides_csv"
   log "Slide attese dal CSV: $expected_slides"
 
-  # Raccoglie tutti i chunk generati.
   shopt -s nullglob
   local chunk_files=( "$LLM_CHUNKS_DIR"/"${VIDEO_BASENAME}".chunk_*.txt )
   shopt -u nullglob
@@ -1475,14 +1665,13 @@ run_llm_pipeline() {
     corrected_file="${LLM_CORRECTED_DIR}/${chunk_basename}.corrected.txt"
     raw_json_path="${LLM_CORRECTED_DIR}/${chunk_basename}.raw.json"
 
-    # Se il chunk corretto esiste già e non è forzata la riesecuzione, salta.
     if [ "$FORCE_ALL" -eq 0 ] && file_exists_nonempty "$corrected_file"; then
       log "Chunk corretto già presente, skip: $corrected_file"
       continue
     fi
 
     log "Upload chunk a ChatGPT: $chunk_file"
-    upload_json="$(run_chatgpt_upload "$chunk_file")"
+    upload_json="$(run_chatgpt_upload "$chunk_file" "$CHATGPT_UPLOAD_STDERR")"
     file_id="$(extract_json_field_with_python "$upload_json" "id")"
     [ -n "$file_id" ] || die "Impossibile estrarre file_id per chunk: $chunk_file"
 
@@ -1509,13 +1698,10 @@ run_llm_pipeline() {
       chatgpt_cmd+=(--save-raw "$raw_json_path")
     fi
 
-    # Il prompt vero e proprio viene passato come ultimo argomento.
     chatgpt_cmd+=("$PROMPT_TEXT")
 
-    if [ "$VERBOSE_LOGS" -eq 1 ]; then
-      "${chatgpt_cmd[@]}" 2> >(tee -a "$CHATGPT_RUN_STDERR" >&2)
-    else
-      "${chatgpt_cmd[@]}" 2>>"$CHATGPT_RUN_STDERR"
+    run_chatgpt_cmd_with_retry "$CHATGPT_RUN_STDERR" "${chatgpt_cmd[@]}"
+
     fi
 
     require_file "$corrected_file"
@@ -1724,6 +1910,7 @@ normalize_and_validate_args
 check_dependencies
 resolve_inputs
 setup_paths
+refresh_prompt_text
 
 # 6) validazione URL solo se serve davvero yt-dlp
 if [ -n "$YOUTUBE_URL" ] && { [ "$SKIP_DOWNLOAD" -eq 0 ] || [ "$SKIP_SUBS" -eq 0 ]; }; then
@@ -1776,6 +1963,9 @@ echo "Output principali:"
 [ -f "$VIDEO_PATH" ] && echo " - Video: $VIDEO_PATH"
 [ -f "$ORIGINAL_SRT" ] && echo " - SRT originale: $ORIGINAL_SRT"
 [ -d "$SLIDES_DIR" ] && echo " - Cartella slide: $SLIDES_DIR"
+[ -d "$LLM_TEXT_DIR" ] && echo " - LLM text: $LLM_TEXT_DIR"
+[ -f "$RAW_TEXT_PATH" ] && echo " - Raw text deduplicato: $RAW_TEXT_PATH"
+[ -f "$LESSON_CONTEXT_OUTPUT" ] && echo " - Metadata lezione: $LESSON_CONTEXT_OUTPUT"
 [ -d "$LLM_CHUNKS_DIR" ] && echo " - Chunk LLM: $LLM_CHUNKS_DIR"
 [ -d "$LLM_CORRECTED_DIR" ] && echo " - Chunk corretti: $LLM_CORRECTED_DIR"
 [ -f "$MERGED_SLIDE_TEXTS_JSON" ] && echo " - JSON finale slide texts: $MERGED_SLIDE_TEXTS_JSON"
