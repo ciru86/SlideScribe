@@ -17,7 +17,9 @@ Dipendenze:
 
 import json
 import re
+import sys
 import argparse
+import logging
 from pathlib import Path
 
 import pandas as pd
@@ -31,6 +33,32 @@ from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.section import WD_ORIENT
 from docx.enum.text import WD_BREAK
+
+
+
+
+# =========================================================
+# LOGGING
+# =========================================================
+
+logger = logging.getLogger("slides_and_texts_to_pdf")
+
+
+def setup_logging(verbose: bool = False):
+    # Configura un logging semplice su schermo.
+    #
+    # - INFO: mostra le fasi principali del lavoro
+    # - DEBUG: mostra anche dettagli più fini utili per capire dove si trova lo script
+    level = logging.DEBUG if verbose else logging.INFO
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(level)
+    handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+
+    logger.setLevel(level)
+    logger.handlers.clear()
+    logger.addHandler(handler)
+    logger.propagate = False
 
 
 # =========================================================
@@ -119,6 +147,7 @@ def load_slide_texts_json(json_path: Path) -> dict[int, str]:
     #
     # Restituisce:
     #   dizionario {slide_index: testo}
+    logger.info(f"Leggo il JSON dei testi slide: {json_path}")
     raw = json.loads(json_path.read_text(encoding="utf-8"))
 
     # Validazione minima della root JSON.
@@ -130,6 +159,8 @@ def load_slide_texts_json(json_path: Path) -> dict[int, str]:
         raise ValueError(f"JSON non valido: chiave 'slides' mancante o non lista -> {json_path}")
 
     slide_map: dict[int, str] = {}
+
+    logger.info(f"Trovate {len(slides)} slide nel JSON dei testi")
 
     for item in slides:
         # Ogni elemento deve essere un dizionario.
@@ -156,6 +187,7 @@ def load_slide_texts_json(json_path: Path) -> dict[int, str]:
 
         slide_map[slide_index] = text
 
+    logger.info(f"Mappa testi costruita: {len(slide_map)} slide indicizzate")
     return slide_map
 
 
@@ -172,6 +204,7 @@ def build_entries_from_csv_and_json(slides_df: pd.DataFrame, slide_text_map: dic
     #
     # slide_end viene derivato dal timestamp della slide successiva.
     # Per l'ultima slide si usa +inf, perché non c'è una successiva.
+    logger.info("Costruisco la struttura unificata slide/testi")
     slides = slides_df.copy().sort_values("timestamp_sec").reset_index(drop=True)
 
     required_cols = {"slide_index", "timestamp_sec", "filename"}
@@ -184,6 +217,8 @@ def build_entries_from_csv_and_json(slides_df: pd.DataFrame, slide_text_map: dic
     timestamps = slides["timestamp_sec"].tolist()
     filenames = slides["filename"].tolist()
     slide_indices = slides["slide_index"].tolist()
+
+    logger.debug(f"CSV ordinato: {len(slides)} righe")
 
     for i in range(len(slides)):
         slide_index = int(slide_indices[i])
@@ -202,6 +237,7 @@ def build_entries_from_csv_and_json(slides_df: pd.DataFrame, slide_text_map: dic
             "text": text,
         })
 
+    logger.info(f"Struttura finale pronta: {len(entries)} slide")
     return entries
 
 
@@ -318,6 +354,7 @@ def draw_summary_pages(c, page_w, page_h, entries, pdf_title, start_page_num):
     Disegna il sommario su una o più pagine PDF.
     Restituisce il prossimo page number disponibile.
     """
+    logger.info(f"Genero il sommario PDF ({len(entries)} slide)")
     page_num = start_page_num
 
     # Margini e metrica verticale.
@@ -390,6 +427,7 @@ def draw_slide_page(c, page_w, page_h, slide_path, text_lines, slide_num, time_r
     #
     # Restituisce il numero di righe testo effettivamente consumate
     # in questa pagina.
+    logger.debug(f"Disegno pagina PDF della slide {slide_num} ({slide_path.name})")
     draw_header(c, page_w, page_h, f"Slide {slide_num}", time_range)
     draw_footer(c, page_w, page_h, page_num)
 
@@ -459,6 +497,7 @@ def draw_text_continuation_page(c, page_w, page_h, text_lines, slide_num, page_n
     # della slide non entra tutto nella pagina principale.
     #
     # Restituisce quante righe sono state consumate in questa pagina.
+    logger.debug(f"Aggiungo pagina PDF di continuazione testo per slide {slide_num}")
     draw_header(c, page_w, page_h, f"Slide {slide_num}", "Continuazione testo")
     draw_footer(c, page_w, page_h, page_num)
 
@@ -493,6 +532,7 @@ def build_pdf(entries, input_dir: Path, output_pdf: Path):
     # 3) per ogni slide crea almeno una pagina
     # 4) se il testo è troppo lungo, aggiunge pagine di continuazione
     # 5) salva il PDF
+    logger.info(f"Avvio generazione PDF: {output_pdf}")
     page_w, page_h = landscape(A4)
     c = canvas.Canvas(str(output_pdf), pagesize=(page_w, page_h))
 
@@ -501,6 +541,8 @@ def build_pdf(entries, input_dir: Path, output_pdf: Path):
 
     page_num = 1
     page_num = draw_summary_pages(c, page_w, page_h, entries, pdf_title, page_num)
+
+    logger.info(f"Genero le pagine PDF delle slide ({len(entries)} totali)")
 
     for entry in entries:
         slide_path = input_dir / entry["filename"]
@@ -514,6 +556,8 @@ def build_pdf(entries, input_dir: Path, output_pdf: Path):
         lines = wrap_text_to_width(raw_text, "Helvetica", 11, max_text_width)
 
         time_range = f"{seconds_to_hms(entry['slide_start'])}"
+
+        logger.info(f"PDF -> slide {entry['slide_index']} | immagine: {slide_path.name}")
 
         consumed = draw_slide_page(
             c,
@@ -532,6 +576,7 @@ def build_pdf(entries, input_dir: Path, output_pdf: Path):
         remaining = lines[consumed:]
 
         while remaining:
+            logger.info(f"PDF -> slide {entry['slide_index']} richiede una pagina di continuazione")
             consumed2 = draw_text_continuation_page(
                 c,
                 page_w,
@@ -545,6 +590,7 @@ def build_pdf(entries, input_dir: Path, output_pdf: Path):
             remaining = remaining[consumed2:]
 
     c.save()
+    logger.info(f"PDF salvato: {output_pdf}")
 
 
 # =========================================================
@@ -557,6 +603,7 @@ def set_landscape(document: Document):
     # Nota:
     # in python-docx, per cambiare davvero orientamento bisogna anche
     # scambiare page_width e page_height.
+    logger.debug("Imposto il DOCX in formato landscape")
     section = document.sections[0]
     section.orientation = WD_ORIENT.LANDSCAPE
     section.page_width, section.page_height = section.page_height, section.page_width
@@ -572,6 +619,7 @@ def get_usable_width_inches(document: Document) -> float:
     #
     # python-docx lavora internamente in EMU.
     # Qui convertiamo in pollici perché add_picture usa Inches(...).
+    logger.debug("Imposto il DOCX in formato landscape")
     section = document.sections[0]
     usable = section.page_width - section.left_margin - section.right_margin
     return usable / 914400  # EMU -> inches
@@ -583,6 +631,7 @@ def add_docx_summary(document: Document, entries, title: str):
     # - numero slide
     # - elenco slide con timestamp e filename
     # - page break finale
+    logger.info(f"Aggiungo sommario DOCX ({len(entries)} slide)")
     p = document.add_paragraph()
     r = p.add_run(title)
     r.bold = True
@@ -591,10 +640,13 @@ def add_docx_summary(document: Document, entries, title: str):
     p = document.add_paragraph(f"Numero slide: {len(entries)}")
     p.runs[0].font.size = Pt(11)
 
+    logger.info(f"Aggiungo sommario DOCX ({len(entries)} slide)")
     p = document.add_paragraph()
     r = p.add_run("Indice")
     r.bold = True
     r.font.size = Pt(13)
+
+    logger.info(f"Genero le pagine PDF delle slide ({len(entries)} totali)")
 
     for entry in entries:
         p = document.add_paragraph(
@@ -613,6 +665,8 @@ def add_slide_block_docx(document: Document, slide_num: int, slide_path: Path, t
     # - immagine slide
     # - testo associato
     # - page break finale
+    logger.info(f"Aggiungo sommario DOCX ({len(entries)} slide)")
+    logger.info(f"DOCX -> slide {slide_num} | immagine: {slide_path.name}")
     p = document.add_paragraph()
     r = p.add_run(f"Slide {slide_num}")
     r.bold = True
@@ -653,6 +707,7 @@ def build_docx(entries, input_dir: Path, output_docx: Path):
     # 3) aggiunge sommario
     # 4) aggiunge un blocco per ogni slide
     # 5) salva
+    logger.info(f"Avvio generazione DOCX: {output_docx}")
     doc = Document()
     set_landscape(doc)
 
@@ -663,6 +718,8 @@ def build_docx(entries, input_dir: Path, output_docx: Path):
     # per evitare che l'immagine tocchi troppo i bordi.
     usable_width = get_usable_width_inches(doc)
     image_width = max(4.0, usable_width - 0.2)
+
+    logger.info(f"Genero le pagine PDF delle slide ({len(entries)} totali)")
 
     for entry in entries:
         slide_path = input_dir / entry["filename"]
@@ -677,6 +734,7 @@ def build_docx(entries, input_dir: Path, output_docx: Path):
         )
 
     doc.save(str(output_docx))
+    logger.info(f"DOCX salvato: {output_docx}")
 
 
 # =========================================================
@@ -714,15 +772,29 @@ def main():
         default="slides_con_testo",
         help="Nome base output senza estensione",
     )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Mostra log più dettagliati su schermo",
+    )
     args = parser.parse_args()
+
+    setup_logging(args.verbose)
+    logger.info("Avvio script slides_and_texts_to_pdf")
 
     # Risolve i path in modo robusto.
     input_dir = Path(args.input_dir.strip()).expanduser().resolve()
+    logger.info(f"Cartella input: {input_dir}")
     csv_path = input_dir / args.csv
     slide_texts_path = Path(args.slide_texts).expanduser().resolve()
 
     output_pdf = input_dir / f"{args.output_base}.pdf"
     output_docx = input_dir / f"{args.output_base}.docx"
+
+    logger.info(f"CSV atteso: {csv_path}")
+    logger.info(f"JSON testi: {slide_texts_path}")
+    logger.info(f"Output PDF:  {output_pdf}")
+    logger.info(f"Output DOCX: {output_docx}")
 
     # Validazione esistenza input.
     if not input_dir.exists():
@@ -735,7 +807,9 @@ def main():
         raise FileNotFoundError(f"JSON slide texts non trovato: {slide_texts_path}")
 
     # Lettura CSV.
+    logger.info(f"Leggo il CSV slide: {csv_path}")
     slides_df = pd.read_csv(csv_path)
+    logger.info(f"CSV caricato: {len(slides_df)} righe")
 
     required_cols = {"slide_index", "timestamp_sec", "filename"}
     missing = required_cols - set(slides_df.columns)
@@ -747,9 +821,11 @@ def main():
     entries = build_entries_from_csv_and_json(slides_df, slide_text_map)
 
     # Generazione output finali.
+    logger.info("Inizio generazione artefatti finali")
     build_pdf(entries, input_dir, output_pdf)
     build_docx(entries, input_dir, output_docx)
 
+    logger.info("Elaborazione completata")
     print(f"PDF creato:  {output_pdf}")
     print(f"DOCX creato: {output_docx}")
 
