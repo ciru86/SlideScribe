@@ -1,0 +1,12 @@
+chatgpt --file-id file-FnRNe3bYmne66M6tLNzG6j -o ~/Desktop/t "Ti allego un file con la sbobinatura SST di una lezione su \"Dolore miofasciale e fibromialgia\".
+È stata ottenuta da trascrizione automatica (Whisper / speech-to-text), quindi può contenere errori di trascrizione, punteggiatura imperfetta, termini tecnici sbagliati e frasi poco naturali.
+Il tuo compito è ripulire il testo associato migliorandone la leggibilità, ma senza aggiungere contenuti non presenti nell’originale.
+- NON aggiungere commenti, note, introduzioni o conclusioni
+- NON aggiungere concetti, spiegazioni, esempi o dettagli che non siano già presenti nel testo
+
+Puoi modificare SOLO per:
+- correggere errori di trascrizione
+- correggere termini tecnici
+- migliorare punteggiatura e leggibilità
+- riformulare frasi poco naturali o troppo orali in un italiano più chiaro e scorrevole
+- eliminare ripetizioni inutili o piccoli inciampi tipici del parlato, purché il significato resti invariato"

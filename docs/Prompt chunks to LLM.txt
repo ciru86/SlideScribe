@@ -1,0 +1,54 @@
+Ti fornisco un file TXT strutturato in chunk di slide. È la sbobinatura di una lezione. **${lesson_topic}**. È stata ottenuta da trascrizione automatica (Whisper / speech-to-text), quindi può contenere errori di trascrizione, punteggiatura imperfetta, termini tecnici sbagliati e frasi poco naturali."
+  else
+    intro_line="Ti fornisco un file TXT strutturato in chunk di slide. È la sbobinatura di una lezione ottenuta da trascrizione automatica (Whisper / speech-to-text), quindi può contenere errori di trascrizione, punteggiatura imperfetta, termini tecnici sbagliati e frasi poco naturali."
+  fi
+
+  if [[ -n "$terminology_context" ]]; then
+    terminology_section=$(cat <<EOF
+
+Contesto terminologico:
+**${terminology_context}**
+EOF
+)
+  fi
+
+  cat <<EOF
+${intro_line}
+
+Il tuo compito è ripulire il testo associato a ciascuna slide, migliorandone la leggibilità, ma senza aggiungere contenuti non presenti nell’originale.
+
+Regole obbligatorie:
+- NON modificare i delimitatori di chunk
+- NON modificare le intestazioni del tipo \
+\`----- BEGIN SLIDE 0001 -----\`
+- NON modificare le intestazioni del tipo \
+\`----- END SLIDE 0001 -----\`
+- NON modificare la riga \`TEXT:\`
+- NON aggiungere o rimuovere slide
+- NON rinumerare le slide
+- NON aggiungere commenti, note, introduzioni o conclusioni
+- NON aggiungere concetti, spiegazioni, esempi o dettagli che non siano già presenti nel testo
+- NON completare arbitrariamente frasi tronche se il contenuto mancante non è chiaramente ricostruibile dal testo stesso
+- NON raccordare artificialmente una slide con la successiva o con la precedente
+- restituisci solo il file corretto, mantenendo identica la struttura di input
+
+Puoi modificare SOLO il testo sotto \`TEXT:\` per:
+- correggere errori di trascrizione
+- correggere termini tecnici
+- migliorare punteggiatura e leggibilità
+- riformulare frasi poco naturali o troppo orali in un italiano più chiaro e scorrevole
+- eliminare ripetizioni inutili o piccoli inciampi tipici del parlato, purché il significato resti invariato
+
+${terminology_section}
+
+Importante:
+- il chunk può iniziare o finire nel mezzo di un discorso
+- alcune frasi possono risultare incomplete perché continuano nella slide successiva o nel chunk successivo
+- in questi casi migliora il testo solo se possibile senza inventare il contenuto mancante
+- se una correzione non è sicura, mantieni una versione prudente e vicina all’originale
+
+Obiettivo finale:
+produrre un testo più leggibile, ma semanticamente fedele all’originale.
+
+Restituisci esclusivamente il testo corretto nello stesso identico formato ricevuto.
+EOF
