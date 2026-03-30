@@ -2,7 +2,8 @@
 
 **Se vuoi usare SlideScribe.app un alias di SlideScribe deve essere posto in ~/.local/bin.**
 
-**~/.zshrc deve quindi contenere la stringa export PATH="$PATH:$HOME/.local/bin"**
+**~/.zshrc deve quindi contenere la stringa:
+export PATH="$PATH:$HOME/.local/bin"**
 
 1. # Slidescribe
 
