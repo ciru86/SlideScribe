@@ -16,6 +16,8 @@ export PATH="$PATH:$HOME/.local/bin"**
    - video locale in `.mkv`
    - sottotitoli automatici in `.srt`
    - cartella con le slide estratte dal video
+   - testo deduplicato derivato dall’SRT, senza timestamp, usato per inferire automaticamente il contesto della lezione
+   - file con argomento lezione e terminologia tecnica inferiti automaticamente
    - chunk testuali preparati per l’LLM
    - chunk corretti dall’LLM
    - JSON finale con il testo associato a ciascuna slide
@@ -24,7 +26,7 @@ export PATH="$PATH:$HOME/.local/bin"**
 
    In pratica la pipeline è:
 
-   **YouTube → video/subtitles → estrazione slide → export per LLM → correzione chunk → merge finale → PDF/DOCX**
+   **YouTube → video/subtitles → estrazione slide → dedup SRT → inferenza automatica metadata prompt → export per LLM → correzione chunk → merge finale → PDF/DOCX**
 
    ------
 
@@ -36,11 +38,13 @@ export PATH="$PATH:$HOME/.local/bin"**
 
    1. scarica video e sottotitoli
    2. rileva i cambi slide e salva le immagini
-   3. allinea la trascrizione alle slide
-   4. divide il testo in chunk gestibili dall’LLM
-   5. corregge i chunk via ChatGPT
-   6. ricompone il materiale in un JSON finale
-   7. genera PDF e DOCX con slide + testo
+   3. deduplica l’SRT e crea un testo grezzo senza timestamp
+   4. inferisce automaticamente argomento lezione e terminologia tecnica da usare nel prompt LLM
+   5. allinea la trascrizione alle slide
+   6. divide il testo in chunk gestibili dall’LLM
+   7. corregge i chunk via ChatGPT
+   8. ricompone il materiale in un JSON finale
+   9. genera PDF e DOCX con slide + testo
 
    L’orchestratore è scritto in Bash e coordina moduli Python e tool esterni.
 
@@ -63,7 +67,7 @@ export PATH="$PATH:$HOME/.local/bin"**
    - **Bash**: orchestrazione, validazioni, skip, checkpoint, logging
    - **Python modules**: lavorazioni specializzate
    - **yt-dlp**: download video e sottotitoli
-   - **chatgpt wrapper**: upload file e correzione LLM
+   - **chatgpt wrapper**: upload file, inferenza metadata lezione e correzione LLM
 
    ------
 
@@ -100,15 +104,34 @@ export PATH="$PATH:$HOME/.local/bin"**
    - `WORKDIR/VIDEO_BASENAME slides/`
    - `WORKDIR/VIDEO_BASENAME slides/slides.csv`
 
-   ### 4. Export per LLM
+   ### 4. Preparazione automatica del contesto lezione
 
-   Il modulo `export_for_llm.py` prende il file `.srt` e `slides.csv`, associa il testo alle slide e crea file chunkati per l’elaborazione LLM.
+   Prima di costruire i chunk per l’LLM, Slidescribe genera automaticamente le variabili che andranno inserite nel prompt.
+
+   La sequenza è questa:
+
+   - il modulo `srt_to_text_dedup.py` trasforma `VIDEO_BASENAME.original.srt` in un testo deduplicato senza timestamp
+   - viene creato `WORKDIR/llm-text/raw_text.txt`
+   - se `LESSON_TOPIC` e `TERMINOLOGY_CONTEXT` non sono stati forniti manualmente, `raw_text.txt` viene caricato al wrapper `chatgpt`
+   - ChatGPT restituisce un file con due campi strutturati: `[[Argomento lezione: ...]]` e `{{Terminologia: ...}}`
+   - lo script estrae questi valori e li usa per costruire il prompt LLM finale
+
+   Se uno dei metadati viene fornito manualmente, l’inferenza automatica viene saltata in tutto o in parte e il prompt viene rigenerato usando i valori disponibili.
+
+   Output principali:
+
+   - `WORKDIR/llm-text/raw_text.txt`
+   - `WORKDIR/llm-text/lesson_context.txt`
+
+   ### 5. Export per LLM
+
+   Il modulo `export_for_llm.py` prende il file `.srt` e `slides.csv`, associa il testo alle slide e crea file chunkati per l’elaborazione LLM. Il prompt usato per la successiva correzione non dipende più solo da valori statici o manuali: viene rigenerato dopo la fase di inferenza automatica del contesto.
 
    Output principali:
 
    - `WORKDIR/llm_chunks/VIDEO_BASENAME.chunk_XXXX.txt`
 
-   ### 5. Correzione LLM
+   ### 6. Correzione LLM
 
    Ogni chunk viene caricato tramite il wrapper `chatgpt`, corretto dal modello e salvato in una directory dedicata.
 
@@ -117,7 +140,7 @@ export PATH="$PATH:$HOME/.local/bin"**
    - `WORKDIR/llm_corrected/VIDEO_BASENAME.chunk_XXXX.corrected.txt`
    - eventuali file raw JSON di debug
 
-   ### 6. Merge finale
+   ### 7. Merge finale
 
    Il modulo `import_corrected_for_pdf_docx.py` legge tutti i chunk corretti e costruisce il JSON finale con il testo delle slide.
 
@@ -125,7 +148,7 @@ export PATH="$PATH:$HOME/.local/bin"**
 
    - `WORKDIR/llm_merged/VIDEO_BASENAME.slide_texts.json`
 
-   ### 7. Generazione PDF e DOCX
+   ### 8. Generazione PDF e DOCX
 
    Il modulo `slides_and_texts_to_pdf.py` usa cartella slide, `slides.csv` e JSON finale per creare i documenti finali.
 
@@ -227,7 +250,20 @@ export PATH="$PATH:$HOME/.local/bin"**
 
    Se non viene passato un prompt esterno, lo script costruisce un prompt interno in italiano pensato per ripulire una trascrizione automatica.
 
-   L’idea è questa:
+   La differenza rispetto alla versione precedente è che prima di costruire il prompt prova automaticamente a ricavare due variabili dal contenuto dell’SRT:
+
+   - `LESSON_TOPIC`
+   - `TERMINOLOGY_CONTEXT`
+
+   Il meccanismo è questo:
+
+   1. `modules/srt_to_text_dedup.py` converte l’SRT originale in `llm-text/raw_text.txt`, rimuovendo timestamp e deduplicando il testo
+   2. se i metadata non sono già stati forniti manualmente, `raw_text.txt` viene caricato a ChatGPT con un prompt separato di inferenza
+   3. la risposta viene salvata in `llm-text/lesson_context.txt`
+   4. lo script prova a estrarre due campi strutturati: `[[Argomento lezione: ...]]` e `{{Terminologia: ...}}`
+   5. i valori estratti vengono reiniettati nel prompt finale di correzione dei chunk
+
+   L’idea del prompt di correzione resta questa:
 
    - correggere errori di trascrizione
    - sistemare termini tecnici
@@ -237,7 +273,7 @@ export PATH="$PATH:$HOME/.local/bin"**
 
    Questa rigidità è essenziale, perché i moduli successivi si aspettano un formato molto preciso.
 
-   Se viene fornito contesto terminologico, questo viene aggiunto al prompt.
+   Se viene fornito `--prompt-file`, il prompt built-in viene sostituito completamente. Se viene fornito contesto terminologico manuale, questo viene integrato nel prompt senza passare dall’inferenza automatica completa.
 
    ------
 
@@ -261,6 +297,9 @@ export PATH="$PATH:$HOME/.local/bin"**
    │   ├── [immagini slide]
    │   ├── lezione1.pdf
    │   └── lezione1.docx
+   ├── llm-text/
+   │   ├── raw_text.txt
+   │   └── lesson_context.txt
    ├── llm_chunks/
    │   └── lezione1.chunk_*.txt
    ├── llm_corrected/
@@ -288,6 +327,8 @@ export PATH="$PATH:$HOME/.local/bin"**
    - download video
    - download sottotitoli
    - screenshot
+   - deduplicazione SRT
+   - inferenza automatica metadata lezione
    - export LLM
    - upload ChatGPT
    - run ChatGPT
@@ -311,9 +352,10 @@ export PATH="$PATH:$HOME/.local/bin"**
    7. risoluzione input e path
    8. calcolo checkpoint
    9. verifica prerequisiti per gli skip
-   10. esecuzione pipeline attiva
-   11. cleanup finale
-   12. riepilogo output
+   10. eventuale preparazione automatica del contesto lezione da SRT
+   11. esecuzione pipeline attiva
+   12. cleanup finale
+   13. riepilogo output
 
    Questo è utile da ricordare quando devi capire in che fase viene deciso davvero un certo comportamento.
 
@@ -324,6 +366,8 @@ export PATH="$PATH:$HOME/.local/bin"**
    - `WORKDIR` e `VIDEO_BASENAME` determinano quasi tutta la struttura dei file
    - `slides.csv` è il perno della parte slide
    - `VIDEO_BASENAME.original.srt` è il perno della parte testo sorgente
+   - `llm-text/raw_text.txt` è il testo deduplicato usato per inferire il contesto della lezione
+   - `llm-text/lesson_context.txt` contiene argomento e terminologia estratti automaticamente
    - `llm_chunks` contiene gli input per l’LLM
    - `llm_corrected` contiene gli output corretti
    - `llm_merged/*.slide_texts.json` è il file finale usato dal renderer
@@ -626,6 +670,61 @@ export PATH="$PATH:$HOME/.local/bin"**
    In una frase: `Screenshot_grabber.py` prende un video, fa scegliere all’utente la slide da catturare, rileva automaticamente i cambi slide nel tempo, salva immagini rettificate e produce `slides.csv`, cioè la base temporale e visiva su cui si appoggia tutto il resto della pipeline.
 
    
+
+   ## srt_to_text_dedup.py
+
+   Modulo di preparazione del contesto LLM. Non divide il testo in chunk e non allinea nulla alle slide: prende l’SRT sorgente, ne estrae il contenuto testuale, rimuove timestamp e duplicazioni evidenti, e produce un file TXT pulito pensato per una sola cosa: permettere a ChatGPT di capire rapidamente di che lezione si tratta e quali termini tecnici saranno rilevanti nel prompt finale.
+
+   ### Funzione del modulo
+
+   `srt_to_text_dedup.py` fa da passaggio intermedio fra sottotitoli grezzi e costruzione del prompt LLM.
+
+   In pratica:
+
+   1. legge `VIDEO_BASENAME.original.srt`
+   2. elimina la struttura temporale dell’SRT
+   3. comprime duplicati e ripetizioni inutili tipiche della trascrizione automatica
+   4. scrive un testo lineare e più pulito in `llm-text/raw_text.txt`
+
+   ### Perché esiste
+
+   L’SRT originale è utile per l’allineamento temporale, ma è pessimo come input per inferire il contesto globale della lezione: contiene timestamp, segmentazione artificiale e ripetizioni.
+
+   Questo modulo crea quindi un testo più adatto a una lettura semantica rapida da parte dell’LLM, così che Slidescribe possa generare automaticamente:
+
+   - argomento della lezione
+   - terminologia tecnica di dominio
+
+   ### Output
+
+   Output principale:
+
+   - `WORKDIR/llm-text/raw_text.txt`
+
+   Output indiretto nella pipeline:
+
+   - `WORKDIR/llm-text/lesson_context.txt`, generato dopo upload a ChatGPT e risposta del modello
+
+   ### Ruolo nella pipeline
+
+   Si colloca dopo il download/normalizzazione dei sottotitoli e prima dell’export chunk per l’LLM.
+
+   Non sostituisce `export_for_llm.py`: prepara solo le variabili che andranno usate nel prompt di correzione.
+
+   ### Logica operativa
+
+   La sequenza reale dentro l’orchestratore è:
+
+   1. verifica che esista `VIDEO_BASENAME.original.srt`
+   2. genera `raw_text.txt` con `srt_to_text_dedup.py`
+   3. se `LESSON_TOPIC` o `TERMINOLOGY_CONTEXT` sono già stati forniti, salta l’inferenza automatica completa
+   4. altrimenti carica `raw_text.txt` al wrapper `chatgpt`
+   5. salva la risposta in `lesson_context.txt`
+   6. estrae i campi strutturati e rigenera `PROMPT_TEXT` finale
+
+   ### Risultato pratico
+
+   L’utente non deve più preparare manualmente, come caso normale, le variabili di contesto del prompt: Slidescribe ci prova da solo a partire dall’SRT. In caso di override manuale, quei valori restano prioritari.
 
    ## export_for_llm.py
 
