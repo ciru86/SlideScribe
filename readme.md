@@ -1,4 +1,5 @@
 **Prima di lanciare SlideScribe crea la venv copiando nella root dello script i file create_venv.sh e requirements.txt nella cartella "tools".**
+**Se vuoi usare SlideScribe.app un alias di SlideScribe deve essere posto in ~/.local/bin**
 
 1. # Slidescribe
 
