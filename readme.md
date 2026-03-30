@@ -2,14 +2,35 @@
 
 **Prima di lanciare SlideScribe crea la .venv copiando nella root dello script i file create_venv.sh e requirements.txt presenti nella cartella "tools" e lanciando crate_venv.sh.**
 
-**Il wrapper chatgpt deve essere copiato in ~/.local/bin.**
+**REQUISITI**
+- Il wrapper chatgpt deve essere copiato in ~/.local/bin.
 
-**Se vuoi usare SlideScribe.app un alias di SlideScribe deve essere posto in ~/.local/bin.**
+- IL file ~/.secrets deve contenere la API Key di chatgpt
 
-**~/.zshrc deve quindi contenere la stringa:
-export PATH="$PATH:$HOME/.local/bin"**
+- jq deve essere installato (brew install jq9
+
+- Il fallback di yt-dlp deve essere installato con pipx (homebrew install pipx):
+	- pipx reinstall yt-dlp
+	- pipx inject yt-dlp "curl-cffi>=0.10"
+
+- ~/.zshrc deve quindi contenere le stringhe:
+	# Homebrew
+	eval "$(/opt/homebrew/bin/brew shellenv)"
+
+	# User bin
+	export PATH="$PATH:$HOME/.local/bin"
+
+	# Aliases
+	alias ytdl='yt-dlp'
+	alias ytdlpipx="$HOME/.local/bin/yt-dlp"
+
+
+	# Secrets
+	[ -f ~/.secrets ] && source ~/.secrets
 
 **Tutti gli script devono essere resi eseguibili con chmod +x.**
+
+**Se vuoi usare SlideScribe.app un alias di SlideScribe deve essere posto in ~/.local/bin.**
 
 1. # Slidescribe
 
