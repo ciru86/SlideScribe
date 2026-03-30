@@ -1,3 +1,5 @@
+# To do first!!
+
 **Prima di lanciare SlideScribe crea la .venv copiando nella root dello script i file create_venv.sh e requirements.txt presenti nella cartella "tools" e lanciando crate_venv.sh.**
 
 **Il wrapper chatgpt deve essere copiato in ~/.local/bin.**
