@@ -430,6 +430,7 @@ MANUALE - Slidescribe
 
    Nota:
    - se VIDEO_BASENAME non è specificato, viene usato il nome del file MKV sorgente
+   - se WORKDIR non è specificata, viene creata automaticamente in ~/Desktop/<nome_file_video>
 
 8) MODALITA' --WHISPER
    Se passi --whisper:
@@ -1105,10 +1106,16 @@ resolve_inputs() {
   # Risolve tutti gli input richiesti per l'esecuzione.
   # Se mancano e siamo in interattivo, li chiede all'utente.
   if [ -z "$WORKDIR" ]; then
-    WORKDIR="$(prompt_nonempty 'Inserisci il path della cartella di lavoro: ')"
+    if [ -n "$INPUT_MKV" ]; then
+      local input_basename
+      input_basename="$(basename "$INPUT_MKV" .mkv)"
+      WORKDIR="$HOME/Desktop/$input_basename"
+    else
+      WORKDIR="$(prompt_nonempty 'Inserisci il path della cartella di lavoro: ')"
 
-    # Correzione per path trascinati nel terminale con spazi escapati come `\ `.
-    WORKDIR="${WORKDIR//\\ / }"
+      # Correzione per path trascinati nel terminale con spazi escapati come `\ `.
+      WORKDIR="${WORKDIR//\\ / }"
+    fi
   fi
 
   WORKDIR="$(trim "$WORKDIR")"
