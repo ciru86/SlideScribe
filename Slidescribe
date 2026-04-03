@@ -127,6 +127,7 @@ ENHANCE_PRESET=""
 WORKDIR=""
 OUTPUT_BASE="$SCRIPT_DIR/output"
 YOUTUBE_URL=""
+INPUT_MKV=""
 VIDEO_BASENAME=""
 LESSON_TOPIC=""
 TERMINOLOGY_CONTEXT=""
@@ -328,6 +329,7 @@ Uso:
 Opzioni principali:
   --workdir PATH                 Cartella di lavoro (relativa a $OUTPUT_BASE se non assoluta)
   --youtube-url URL              URL del video YouTube
+  --input-mkv FILE               File MKV locale da importare in WORKDIR come VIDEO_BASENAME.mkv
   --video-basename NAME          Nome base del video/file output (senza estensione)
   --lesson-topic TEXT            Argomento della lezione (override manuale)
   --terminology-context TEXT     Contesto terminologico (override manuale)
@@ -379,6 +381,7 @@ MANUALE - Slidescribe
 1) SCOPO
    Orchestrare una pipeline che:
    - scarica un video YouTube
+   - oppure importa un file MKV locale
    - scarica i sottotitoli automatici oppure genera un SRT via Whisper
    - estrae screenshot delle slide
    - esporta testo+slide in chunk per LLM
@@ -418,7 +421,17 @@ MANUALE - Slidescribe
    - system   : usa solo yt-dlp nel PATH
    - fallback : usa solo ~/.local/bin/yt-dlp
 
-7) MODALITA' --WHISPER
+7) MODALITA' --INPUT-MKV
+   Se passi --input-mkv FILE:
+   - Slidescribe verifica che FILE esista ed abbia estensione .mkv
+   - copia il file nella WORKDIR come VIDEO_BASENAME.mkv
+   - salta il download video da YouTube
+   - attiva automaticamente la pipeline con Whisper per generare l'SRT
+
+   Nota:
+   - se VIDEO_BASENAME non è specificato, viene usato il nome del file MKV sorgente
+
+8) MODALITA' --WHISPER
    Se passi --whisper:
    - Slidescribe NON scarica i sottotitoli da YouTube
    - usa invece WORKDIR/VIDEO_BASENAME.mkv come sorgente audio
@@ -435,25 +448,28 @@ MANUALE - Slidescribe
    - il chunking audio interno serve solo a rispettare i limiti dell'API, ma l'SRT finale
      viene ricostruito con timestamp assoluti coerenti rispetto al video completo
 
-8) ROI MODE
+9) ROI MODE
    shared:
      una sola area rettangolare condivisa
    separate:
      trigger separato + area slide poligonale
 
-9) ESEMPIO MINIMO
+10) ESEMPIO MINIMO
    ./slidescribe.sh --config --workdir lezione1 --youtube-url "https://..." --video-basename lezione1
 
-10) ESEMPIO CON --WHISPER
+11) ESEMPIO CON --INPUT-MKV
+   ./slidescribe.sh --workdir /path/lezione1 --input-mkv /path/video_lezione.mkv
+
+12) ESEMPIO CON --WHISPER
    ./slidescribe.sh --workdir /path/lezione1 --video-basename lezione1 --whisper
 
-11) ESEMPIO DA STEP LLM
+13) ESEMPIO DA STEP LLM
    ./slidescribe.sh --config --workdir lezione1 --video-basename lezione1 --from-step llm
 
-12) ESEMPIO SOLO PDF
+14) ESEMPIO SOLO PDF
    ./slidescribe.sh --config --workdir lezione1 --video-basename lezione1 --from-step pdf
 
-13) FILE / CARTELLE CHIAVE
+15) FILE / CARTELLE CHIAVE
    output/<workdir>/
      <basename>.mkv
      <basename>.original.srt
@@ -464,7 +480,7 @@ MANUALE - Slidescribe
      llm_merged/
      logs/
 
-14) DRY RUN
+16) DRY RUN
    Risolve configurazione, controlla coerenza, stampa il piano di esecuzione e termina.
 EOF
 }
@@ -754,6 +770,7 @@ load_config_file() {
   # L'intento è limitare l'effetto del source ai campi noti della pipeline.
   WORKDIR="${WORKDIR:-$WORKDIR}"
   YOUTUBE_URL="${YOUTUBE_URL:-$YOUTUBE_URL}"
+  INPUT_MKV="${INPUT_MKV:-$INPUT_MKV}"
   YTDLP_MODE="${YTDLP_MODE:-$YTDLP_MODE}"
   SUB_LANGS="${SUB_LANGS:-$SUB_LANGS}"
   VIDEO_BASENAME="${VIDEO_BASENAME:-$VIDEO_BASENAME}"
@@ -799,6 +816,10 @@ parse_args() {
       --youtube-url)
         shift; [ "$#" -gt 0 ] || die "Valore mancante per --youtube-url"
         YOUTUBE_URL="$1"
+        ;;
+      --input-mkv)
+        shift; [ "$#" -gt 0 ] || die "Valore mancante per --input-mkv"
+        INPUT_MKV="$1"
         ;;
       --video-basename)
         shift; [ "$#" -gt 0 ] || die "Valore mancante per --video-basename"
@@ -1026,6 +1047,14 @@ normalize_and_validate_args() {
     *) die "Valore non valido per WHISPER: $WHISPER (attesi: 0|1)" ;;
   esac
 
+  if [ -n "$INPUT_MKV" ]; then
+    INPUT_MKV="${INPUT_MKV//\\ / }"
+    [ -f "$INPUT_MKV" ] || die "File passato con --input-mkv non trovato: $INPUT_MKV"
+    [[ "$INPUT_MKV" == *.mkv ]] || die "--input-mkv richiede un file con estensione .mkv"
+    SKIP_DOWNLOAD=1
+    WHISPER=1
+  fi
+
   validate_number "--chunk-size" "$CHUNK_SIZE"
   validate_float "--skip-first-sec" "$SKIP_FIRST_SEC"
   validate_float "--skip-last-sec" "$SKIP_LAST_SEC"
@@ -1090,6 +1119,15 @@ resolve_inputs() {
   mkdir -p "$WORKDIR"
   WORKDIR="$(cd "$WORKDIR" && pwd)"
 
+  if [ -n "$INPUT_MKV" ]; then
+    INPUT_MKV="$(trim "$INPUT_MKV")"
+    if [[ "$INPUT_MKV" != /* ]]; then
+      INPUT_MKV="${SCRIPT_DIR}/${INPUT_MKV}"
+    fi
+    require_file "$INPUT_MKV"
+    INPUT_MKV="$(cd "$(dirname "$INPUT_MKV")" && pwd)/$(basename "$INPUT_MKV")"
+  fi
+
   if [ "$SKIP_DOWNLOAD" -eq 0 ] || { [ "$SKIP_SUBS" -eq 0 ] && [ "$WHISPER" -eq 0 ]; }; then
     if [ -z "$YOUTUBE_URL" ]; then
       YOUTUBE_URL="$(prompt_nonempty 'Inserisci URL video YouTube: ')"
@@ -1097,7 +1135,11 @@ resolve_inputs() {
   fi
 
   if [ -z "$VIDEO_BASENAME" ]; then
-      VIDEO_BASENAME="$(basename "$WORKDIR")"
+      if [ -n "$INPUT_MKV" ]; then
+        VIDEO_BASENAME="$(basename "$INPUT_MKV" .mkv)"
+      else
+        VIDEO_BASENAME="$(basename "$WORKDIR")"
+      fi
   fi
 
   if [ "$SKIP_SCREENSHOTS" -eq 0 ] && [ -z "$ROI_MODE" ]; then
@@ -1380,6 +1422,7 @@ print_resolved_config() {
 WORKDIR="$WORKDIR"
 YOUTUBE_URL="$YOUTUBE_URL"
 VIDEO_BASENAME="$VIDEO_BASENAME"
+INPUT_MKV="$INPUT_MKV"
 LESSON_TOPIC="$LESSON_TOPIC"
 TERMINOLOGY_CONTEXT="$TERMINOLOGY_CONTEXT"
 TERMINOLOGY_FILE="$TERMINOLOGY_FILE"
@@ -1420,6 +1463,7 @@ print_execution_plan() {
   cat <<EOF
 === PIANO DI ESECUZIONE ===
 DOWNLOAD VIDEO:     $( [ "$SKIP_DOWNLOAD" -eq 1 ] && echo SKIP || echo ACTIVE )
+LOCAL MKV IMPORT:   $( [ -n "$INPUT_MKV" ] && echo ACTIVE || echo SKIP )
 SRT INPUT:          $( [ "$SKIP_SUBS" -eq 1 ] && echo SKIP || { [ "$WHISPER" -eq 1 ] && echo "WHISPER ACTIVE" || echo "YTDLP SUBS ACTIVE"; } )
 SCREENSHOTS:        $( [ "$SKIP_SCREENSHOTS" -eq 1 ] && echo SKIP || echo ACTIVE )
 LLM PIPELINE:       $( [ "$SKIP_LLM" -eq 1 ] && echo SKIP || echo ACTIVE )
@@ -1454,6 +1498,27 @@ ensure_prerequisites_for_skips() {
 # ============================================================
 step_download_video() {
   # Scarica il video YouTube in massima qualità e lo remuxa in MKV.
+  # Se è stato passato --input-mkv, importa invece il file locale.
+  if [ -n "$INPUT_MKV" ]; then
+    require_file "$INPUT_MKV"
+
+    if [ "$INPUT_MKV" = "$VIDEO_PATH" ]; then
+      log "Il file MKV sorgente coincide già col target in workdir: $VIDEO_PATH"
+      return 0
+    fi
+
+    if [ "$FORCE_ALL" -eq 0 ] && file_exists_nonempty "$VIDEO_PATH"; then
+      log "Video locale già presente in workdir, skip import MKV: $VIDEO_PATH"
+      return 0
+    fi
+
+    log "Import MKV locale in workdir..."
+    cp -f "$INPUT_MKV" "$VIDEO_PATH"
+    require_file "$VIDEO_PATH"
+    log "Video pronto da file locale: $VIDEO_PATH"
+    return 0
+  fi
+
   if [ "$SKIP_DOWNLOAD" -eq 1 ]; then
     log "Download video skippato"
     return 0
@@ -1854,6 +1919,7 @@ step_generate_pdf() {
 # quando più avanti si carica un file config e si riapplicano gli override CLI.
 PRESET_WORKDIR="$WORKDIR"
 PRESET_YOUTUBE_URL="$YOUTUBE_URL"
+PRESET_INPUT_MKV="$INPUT_MKV"
 PRESET_VIDEO_BASENAME="$VIDEO_BASENAME"
 PRESET_LESSON_TOPIC="$LESSON_TOPIC"
 PRESET_TERMINOLOGY_CONTEXT="$TERMINOLOGY_CONTEXT"
@@ -1894,6 +1960,7 @@ if [ -n "$CONFIG_FILE" ]; then
   # Salva lo stato post-CLI prima del source del config.
   CLI_WORKDIR="$WORKDIR"
   CLI_YOUTUBE_URL="$YOUTUBE_URL"
+  CLI_INPUT_MKV="$INPUT_MKV"
   CLI_VIDEO_BASENAME="$VIDEO_BASENAME"
   CLI_LESSON_TOPIC="$LESSON_TOPIC"
   CLI_TERMINOLOGY_CONTEXT="$TERMINOLOGY_CONTEXT"
@@ -1930,6 +1997,7 @@ if [ -n "$CONFIG_FILE" ]; then
   # Ripristina i default puri, poi carica config.
   WORKDIR="$PRESET_WORKDIR"
   YOUTUBE_URL="$PRESET_YOUTUBE_URL"
+  INPUT_MKV="$PRESET_INPUT_MKV"
   VIDEO_BASENAME="$PRESET_VIDEO_BASENAME"
   LESSON_TOPIC="$PRESET_LESSON_TOPIC"
   TERMINOLOGY_CONTEXT="$PRESET_TERMINOLOGY_CONTEXT"
@@ -1957,6 +2025,7 @@ if [ -n "$CONFIG_FILE" ]; then
   # Riapplica solo i veri override CLI.
   [ "$CLI_WORKDIR" = "$PRESET_WORKDIR" ] || WORKDIR="$CLI_WORKDIR"
   [ "$CLI_YOUTUBE_URL" = "$PRESET_YOUTUBE_URL" ] || YOUTUBE_URL="$CLI_YOUTUBE_URL"
+  [ "$CLI_INPUT_MKV" = "$PRESET_INPUT_MKV" ] || INPUT_MKV="$CLI_INPUT_MKV"
   [ "$CLI_VIDEO_BASENAME" = "$PRESET_VIDEO_BASENAME" ] || VIDEO_BASENAME="$CLI_VIDEO_BASENAME"
   [ "$CLI_LESSON_TOPIC" = "$PRESET_LESSON_TOPIC" ] || LESSON_TOPIC="$CLI_LESSON_TOPIC"
   [ "$CLI_TERMINOLOGY_CONTEXT" = "$PRESET_TERMINOLOGY_CONTEXT" ] || TERMINOLOGY_CONTEXT="$CLI_TERMINOLOGY_CONTEXT"
