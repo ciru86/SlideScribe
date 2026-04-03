@@ -4,6 +4,7 @@ lazy-loader==0.5
 lxml==6.0.2
 networkx==3.6.1
 numpy==2.4.3
+openai>=1.0.0
 opencv-python==4.13.0.92
 packaging==26.0
 pandas==3.0.1

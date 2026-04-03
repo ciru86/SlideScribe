@@ -4,6 +4,8 @@
 
 **REQUISITI**
 - Il wrapper chatgpt deve essere copiato in ~/.local/bin.
+- Per usare `--whisper`, nella `.venv` deve essere installato anche il pacchetto Python `openai`.
+- Per usare `--whisper`, `ffmpeg` e `ffprobe` devono essere disponibili nel `PATH`.
 
 - IL file ~/.secrets deve contenere la API Key di chatgpt
 
@@ -34,14 +36,14 @@
 
 1. # Slidescribe
 
-   Pipeline Bash per trasformare un video YouTube di una lezione in un output finale composto da slide, testo corretto tramite LLM e documenti finali consultabili.
+   Pipeline Bash per trasformare un video YouTube o un file `.mkv` locale di una lezione in un output finale composto da slide, testo corretto tramite LLM e documenti finali consultabili.
 
    ## Cosa produce
 
-   A partire da un video YouTube, lo script genera:
+   A partire da un video YouTube oppure da un file `.mkv` locale, lo script genera:
 
    - video locale in `.mkv`
-   - sottotitoli automatici in `.srt`
+   - sottotitoli automatici in `.srt`, oppure un `.srt` generato da Whisper a partire dal file `.mkv`
    - cartella con le slide estratte dal video
    - testo deduplicato derivato dall’SRT, senza timestamp, usato per inferire automaticamente il contesto della lezione
    - file con argomento lezione e terminologia tecnica inferiti automaticamente
@@ -53,7 +55,7 @@
 
    In pratica la pipeline è:
 
-   **YouTube → video/subtitles → estrazione slide → dedup SRT → inferenza automatica metadata prompt → export per LLM → correzione chunk → merge finale → PDF/DOCX**
+   **YouTube oppure MKV locale → video locale / SRT → estrazione slide → dedup SRT → inferenza automatica metadata prompt → export per LLM → correzione chunk → merge finale → PDF/DOCX**
 
    ------
 
@@ -63,7 +65,7 @@
 
    Lo script:
 
-   1. scarica video e sottotitoli
+   1. scarica video e sottotitoli, oppure importa un `.mkv` locale e genera l’SRT via Whisper
    2. rileva i cambi slide e salva le immagini
    3. deduplica l’SRT e crea un testo grezzo senza timestamp
    4. inferisce automaticamente argomento lezione e terminologia tecnica da usare nel prompt LLM
@@ -93,24 +95,39 @@
 
    - **Bash**: orchestrazione, validazioni, skip, checkpoint, logging
    - **Python modules**: lavorazioni specializzate
-   - **yt-dlp**: download video e sottotitoli
+   - **yt-dlp**: download video e sottotitoli quando la sorgente è YouTube
+   - **OpenAI Whisper + ffmpeg**: generazione SRT da file `.mkv` locale o da video già disponibile
    - **chatgpt wrapper**: upload file, inferenza metadata lezione e correzione LLM
 
    ------
 
    ## Flusso della pipeline
 
-   ### 1. Download video
+   ### 1. Input video
 
-   Se lo step è attivo, lo script scarica il video da YouTube tramite `yt-dlp` e lo salva nella `WORKDIR` in formato `.mkv`.
+   Lo script può ottenere il video in due modi:
+
+   - download da YouTube tramite `yt-dlp`
+   - import di un file `.mkv` locale tramite `--input-mkv`
+
+   Se usi `--input-mkv`, il file viene copiato nella `WORKDIR` come `VIDEO_BASENAME.mkv`.
+   Se non specifichi `--workdir`, la cartella viene creata automaticamente sul Desktop con il nome del file video senza estensione.
 
    Output principale:
 
    - `WORKDIR/VIDEO_BASENAME.mkv`
 
-   ### 2. Download sottotitoli
+   ### 2. Sorgente SRT
 
-   Lo script scarica i sottotitoli automatici, li converte in `.srt` e li normalizza in un file standard usato poi nel resto della pipeline.
+   Lo script può ottenere l’SRT in due modi:
+
+   - scarica i sottotitoli automatici da YouTube e li converte in `.srt`
+   - se è attiva la modalità Whisper, estrae e ottimizza l’audio dal file `.mkv`, lo invia a OpenAI e ricostruisce `VIDEO_BASENAME.original.srt`
+
+   La modalità Whisper viene usata:
+
+   - quando passi `--whisper`
+   - automaticamente quando passi `--input-mkv`
 
    Output principale:
 
@@ -217,6 +234,7 @@
    ```bash
    WORKDIR="/Users/corax/Desktop/lezione1"
    YOUTUBE_URL="https://www.youtube.com/watch?v=..."
+   INPUT_MKV=""
    VIDEO_BASENAME="lezione1"
    MODEL="gpt-5.4"
    TEMPERATURE="0.3"
@@ -267,6 +285,7 @@
    - disponibilità dei comandi esterni
    - esistenza della `.venv` e dei moduli Python
    - raggiungibilità e validità dell’URL YouTube, se serve il download
+   - esistenza e formato del file `.mkv`, se usi `--input-mkv`
    - presenza degli artefatti necessari quando si saltano step manualmente
 
    Questo riduce gli errori “a metà pipeline” e rende più chiaro dove il flusso si rompe.
@@ -391,6 +410,7 @@
    ## Punti pratici da ricordare
 
    - `WORKDIR` e `VIDEO_BASENAME` determinano quasi tutta la struttura dei file
+   - con `--input-mkv` e senza `--workdir`, la workdir viene creata automaticamente in `~/Desktop/<nome_file_video>`
    - `slides.csv` è il perno della parte slide
    - `VIDEO_BASENAME.original.srt` è il perno della parte testo sorgente
    - `llm-text/raw_text.txt` è il testo deduplicato usato per inferire il contesto della lezione
