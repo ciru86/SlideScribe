@@ -9,7 +9,7 @@
 
 - IL file ~/.secrets deve contenere la API Key di chatgpt
 
-- jq deve essere installato (brew install jq9
+- jq deve essere installato (brew install jq)
 
 - Il fallback di yt-dlp deve essere installato con pipx (homebrew install pipx):
 	- pipx reinstall yt-dlp
