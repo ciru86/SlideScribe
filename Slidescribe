@@ -84,6 +84,7 @@ YTDLP_CMD=()
 # Parametri LLM / pipeline.
 # -----------------------------
 MODEL="gpt-5.4"
+SUMMARY_MODEL=""
 TEMPERATURE="0.3"
 
 # Vuoto di default: se resta vuoto, il wrapper chatgpt non riceve
@@ -133,6 +134,7 @@ LESSON_TOPIC=""
 TERMINOLOGY_CONTEXT=""
 TERMINOLOGY_FILE=""
 PROMPT_FILE=""
+SUMMARY_PROMPT_FILE=""
 
 # Config default e config esplicita da CLI.
 CONFIG_DEFAULT="config/slidescribe.conf"
@@ -151,6 +153,7 @@ SKIP_DOWNLOAD=0
 SKIP_SUBS=0
 SKIP_SCREENSHOTS=0
 SKIP_LLM=0
+SKIP_SUMMARY=0
 SKIP_PDF=0
 
 # Punto di ingresso alternativo della pipeline.
@@ -166,11 +169,14 @@ QUIET_LOGS=0
 # -----------------------------
 # Variabili runtime valorizzate più avanti.
 # -----------------------------
+PRE_MOVE_BACKUPS_CREATED=()
 PROMPT_TEXT=""
+SUMMARY_PROMPT_TEXT=""
 DOWNLOADED_SRT=""
 SCREENSHOTS_NEEDED=1
 LLM_PIPELINE_NEEDED=1
 PDF_NEEDED=1
+SUMMARY_NEEDED=1
 
 
 # ============================================================
@@ -257,6 +263,7 @@ backup_file_if_exists() {
   if [ -f "$path" ]; then
     backup="${path}.${reason}.$(timestamp_for_backup)"
     mv "$path" "$backup"
+    PRE_MOVE_BACKUPS_CREATED+=("$backup")
     log "Backup creato: $backup"
   fi
 }
@@ -344,6 +351,7 @@ Opzioni principali:
   --ytdlp-mode MODE              auto | system | fallback
   --cookies-from-browser NAME    Passa --cookies-from-browser a yt-dlp
   --model NAME                   Modello del wrapper chatgpt
+  --summary-model NAME           Modello usato solo per il riassunto finale
   --temperature FLOAT            Temperatura del wrapper chatgpt
   --max-output-tokens N          Max output tokens del wrapper chatgpt
   --effort VALUE                 Effort del wrapper chatgpt
@@ -351,6 +359,7 @@ Opzioni principali:
   --script-verbosity LEVEL       Alias di --verbosity
   --llm-verbosity LEVEL          low | medium | high
   --prompt-file FILE             Prompt custom completo al posto del built-in
+  --summary-prompt-file FILE     Prompt custom per il riassunto finale
   --config                       Usa il config di default: config/slidescribe.conf
   --config-file FILE             Usa un config file esplicito
   --whisper                      Genera l'SRT dal file MKV locale usando OpenAI Whisper
@@ -360,6 +369,7 @@ Controllo pipeline:
   --skip-subs                    Salta download sottotitoli
   --skip-screenshots             Salta Screenshot_grabber
   --skip-llm                     Salta pipeline LLM
+  --skip-summary                 Salta il riassunto finale da slide_texts.json
   --skip-pdf                     Salta generazione PDF/DOCX
   --from-step STEP               screenshots | llm | pdf
   --force-all                    Riesegue anche step con checkpoint già presenti
@@ -583,30 +593,126 @@ EOF
 }
 
 merge_terminology_sources() {
-  # Integra nel contesto terminologico eventuale file esterno passato
-  # via --terminology-file, anteponendolo al contesto già presente.
+  # Restituisce su stdout il contesto terminologico finale, integrando
+  # eventuale file esterno senza duplicare il contenuto a ogni chiamata.
+  local terminology_context="$1"
+
   if [ -n "$TERMINOLOGY_FILE" ]; then
     local terminology_file_content
     terminology_file_content="$(cat "$TERMINOLOGY_FILE")"
-    if [ -n "$TERMINOLOGY_CONTEXT" ]; then
-      TERMINOLOGY_CONTEXT="${terminology_file_content}
-
-${TERMINOLOGY_CONTEXT}"
+    if [ -n "$terminology_context" ]; then
+      printf '%s\n\n%s' "$terminology_file_content" "$terminology_context"
     else
-      TERMINOLOGY_CONTEXT="$terminology_file_content"
+      printf '%s' "$terminology_file_content"
     fi
+  else
+    printf '%s' "$terminology_context"
   fi
+}
+
+build_summary_prompt() {
+  local lesson_topic="$1"
+  local terminology_context="$2"
+  local intro_line=""
+  local terminology_section=""
+
+  if [[ -n "$lesson_topic" ]]; then
+    intro_line="Ti fornisco un file JSON che contiene il testo finale, già ripulito, associato alle slide di una lezione su: ${lesson_topic}."
+  else
+    intro_line="Ti fornisco un file JSON che contiene il testo finale, già ripulito, associato alle slide di una lezione."
+  fi
+
+  if [[ -n "$terminology_context" ]]; then
+    terminology_section=$(cat <<EOF
+
+Contesto terminologico utile:
+${terminology_context}
+EOF
+)
+  fi
+
+  cat <<EOF
+${intro_line}
+
+Il file JSON contiene una lista di slide con indice e testo.
+Devi leggere il contenuto complessivo della lezione e produrre un riassunto finale fedele, chiaro e ben strutturato.
+
+${terminology_section}
+
+Obiettivo:
+- sintetizzare i contenuti principali della lezione
+- rendere il testo leggibile e ordinato
+- mantenere fedeltà ai contenuti presenti
+- NON inventare informazioni non supportate dal testo delle slide
+
+Regole obbligatorie:
+- usa solo le informazioni presenti nel file
+- non aggiungere esempi, spiegazioni o approfondimenti non presenti o non chiaramente deducibili
+- se una parte è ambigua o incompleta, trattala con prudenza
+- non citare numeri di slide
+- non descrivere la struttura del file JSON
+- non inserire premesse del tipo "Ecco il riassunto"
+- non usare emoji
+- non usare tabelle
+- non usare blocchi di codice
+- non usare HTML
+- non usare link
+- non usare citazioni markdown con >
+- non usare livelli di heading oltre ##
+
+Formato di output obbligatorio:
+- restituisci solo Markdown semplice
+- usa questa struttura, nell'ordine indicato:
+
+# Riassunto della lezione
+
+## Panoramica
+Un breve testo di 1-2 paragrafi che riassume l'argomento generale della lezione.
+
+## Punti chiave
+Una lista puntata con 5-10 punti chiave, formulati in modo chiaro e sintetico.
+
+## Implicazioni cliniche
+Un breve testo che evidenzi le principali implicazioni diagnostiche, terapeutiche, prognostiche o decisionali, solo se supportate dal contenuto della lezione.
+Se il materiale non consente inferenze cliniche affidabili, scrivi una sezione prudente e sobria, senza inventare indicazioni.
+
+## Conclusione
+Un breve paragrafo finale che sintetizza il messaggio complessivo della lezione.
+
+Vincoli stilistici:
+- scrivi in italiano
+- stile chiaro, scorrevole, sobrio
+- evita frasi troppo lunghe
+- evita ripetizioni
+- niente grassetto inutile
+- se usi il grassetto, usalo con parsimonia e solo dentro i paragrafi o i punti elenco
+
+Restituisci esclusivamente il markdown finale.
+EOF
 }
 
 refresh_prompt_text() {
   # Rigenera PROMPT_TEXT dopo che LESSON_TOPIC e/o TERMINOLOGY_CONTEXT
   # sono stati eventualmente inferiti in automatico.
-  merge_terminology_sources
+  local merged_terminology_context
+  merged_terminology_context="$(merge_terminology_sources "$TERMINOLOGY_CONTEXT")"
 
   if [ -n "$PROMPT_FILE" ]; then
     PROMPT_TEXT="$(cat "$PROMPT_FILE")"
   else
-    PROMPT_TEXT="$(build_llm_prompt "$LESSON_TOPIC" "$TERMINOLOGY_CONTEXT")"
+    PROMPT_TEXT="$(build_llm_prompt "$LESSON_TOPIC" "$merged_terminology_context")"
+  fi
+}
+
+refresh_summary_prompt_text() {
+  # Rigenera SUMMARY_PROMPT_TEXT con eventuale prompt custom o built-in.
+  local merged_terminology_context
+  merged_terminology_context="$(merge_terminology_sources "$TERMINOLOGY_CONTEXT")"
+
+  if [ -n "$SUMMARY_PROMPT_FILE" ]; then
+    SUMMARY_PROMPT_TEXT="$(cat "$SUMMARY_PROMPT_FILE")"
+  else
+    SUMMARY_PROMPT_TEXT="$(build_summary_prompt "$LESSON_TOPIC" "$merged_terminology_context")"
   fi
 }
 
@@ -708,7 +814,7 @@ cleanup_raw_json_files() {
     return 0
   fi
 
-  for path in "$LESSON_CONTEXT_RAW_JSON" "$LLM_CORRECTED_DIR"/*.raw.json; do
+  for path in "$LESSON_CONTEXT_RAW_JSON" "$MERGED_SUMMARY_RAW_JSON" "$LLM_CORRECTED_DIR"/*.raw.json; do
     if [ -f "$path" ]; then
       rm -f "$path"
       log "Rimosso raw JSON: $path"
@@ -726,6 +832,20 @@ cleanup_temp_files() {
 
   log "--delete-temp impostato, ma al momento non ci sono file temporanei dedicati da eliminare"
   true
+}
+
+cleanup_pre_move_backups() {
+  # Rimuove i backup pre-move dei file finali se la pipeline è arrivata
+  # correttamente in fondo. In questo modo i backup restano disponibili
+  # durante la sostituzione, ma non sporcano la workdir a pipeline conclusa.
+  local path
+
+  for path in "${PRE_MOVE_BACKUPS_CREATED[@]}" "$FINAL_PDF".pre-move.* "$FINAL_DOCX".pre-move.*; do
+    if [ -f "$path" ]; then
+      rm -f "$path"
+      log "Rimosso backup pre-move: $path"
+    fi
+  done
 }
 
 move_final_outputs_to_workdir() {
@@ -785,12 +905,14 @@ load_config_file() {
   SKIP_FIRST_SEC="${SKIP_FIRST_SEC:-$SKIP_FIRST_SEC}"
   SKIP_LAST_SEC="${SKIP_LAST_SEC:-$SKIP_LAST_SEC}"
   MODEL="${MODEL:-$MODEL}"
+  SUMMARY_MODEL="${SUMMARY_MODEL:-$SUMMARY_MODEL}"
   TEMPERATURE="${TEMPERATURE:-$TEMPERATURE}"
   EFFORT="${EFFORT:-$EFFORT}"
   SCRIPT_VERBOSITY="${SCRIPT_VERBOSITY:-$SCRIPT_VERBOSITY}"
   LLM_VERBOSITY="${LLM_VERBOSITY:-$LLM_VERBOSITY}"
   COOKIES_FROM_BROWSER="${COOKIES_FROM_BROWSER:-$COOKIES_FROM_BROWSER}"
   PROMPT_FILE="${PROMPT_FILE:-$PROMPT_FILE}"
+  SUMMARY_PROMPT_FILE="${SUMMARY_PROMPT_FILE:-$SUMMARY_PROMPT_FILE}"
   WHISPER="${WHISPER:-$WHISPER}"
   DELETE_INTERMEDIATE_SRTS="${DELETE_INTERMEDIATE_SRTS:-$DELETE_INTERMEDIATE_SRTS}"
   DELETE_RAW_JSON="${DELETE_RAW_JSON:-$DELETE_RAW_JSON}"
@@ -799,6 +921,7 @@ load_config_file() {
   SKIP_SUBS="${SKIP_SUBS:-$SKIP_SUBS}"
   SKIP_SCREENSHOTS="${SKIP_SCREENSHOTS:-$SKIP_SCREENSHOTS}"
   SKIP_LLM="${SKIP_LLM:-$SKIP_LLM}"
+  SKIP_SUMMARY="${SKIP_SUMMARY:-$SKIP_SUMMARY}"
   SKIP_PDF="${SKIP_PDF:-$SKIP_PDF}"
   FROM_STEP="${FROM_STEP:-$FROM_STEP}"
   FORCE_ALL="${FORCE_ALL:-$FORCE_ALL}"
@@ -877,6 +1000,10 @@ parse_args() {
         shift; [ "$#" -gt 0 ] || die "Valore mancante per --model"
         MODEL="$1"
         ;;
+      --summary-model)
+        shift; [ "$#" -gt 0 ] || die "Valore mancante per --summary-model"
+        SUMMARY_MODEL="$1"
+        ;;
       --temperature)
         shift; [ "$#" -gt 0 ] || die "Valore mancante per --temperature"
         TEMPERATURE="$1"
@@ -900,6 +1027,10 @@ parse_args() {
       --prompt-file)
         shift; [ "$#" -gt 0 ] || die "Valore mancante per --prompt-file"
         PROMPT_FILE="$1"
+        ;;
+      --summary-prompt-file)
+        shift; [ "$#" -gt 0 ] || die "Valore mancante per --summary-prompt-file"
+        SUMMARY_PROMPT_FILE="$1"
         ;;
       --config)
         CONFIG_FILE="$CONFIG_DEFAULT"
@@ -931,6 +1062,9 @@ parse_args() {
         ;;
       --skip-llm)
         SKIP_LLM=1
+        ;;
+      --skip-summary)
+        SKIP_SUMMARY=1
         ;;
       --skip-pdf)
         SKIP_PDF=1
@@ -1066,8 +1200,13 @@ normalize_and_validate_args() {
 
   validate_float "--temperature" "$TEMPERATURE"
 
+  if [ -z "$SUMMARY_MODEL" ]; then
+    SUMMARY_MODEL="$MODEL"
+  fi
+
   [ -z "$TERMINOLOGY_FILE" ] || require_file "$TERMINOLOGY_FILE"
   [ -z "$PROMPT_FILE" ] || require_file "$PROMPT_FILE"
+  [ -z "$SUMMARY_PROMPT_FILE" ] || require_file "$SUMMARY_PROMPT_FILE"
 
   if [ "$YTDLP_MODE" = "system" ]; then
     require_command yt-dlp
@@ -1090,6 +1229,7 @@ normalize_and_validate_args() {
       SKIP_SUBS=1
       SKIP_SCREENSHOTS=1
       SKIP_LLM=1
+      SKIP_SUMMARY=1
       ;;
   esac
 
@@ -1182,6 +1322,8 @@ setup_paths() {
   LLM_CORRECTED_DIR="${WORKDIR}/llm_corrected"
   LLM_MERGED_DIR="${WORKDIR}/llm_merged"
   MERGED_SLIDE_TEXTS_JSON="${LLM_MERGED_DIR}/${VIDEO_BASENAME}.slide_texts.json"
+  MERGED_SUMMARY_MD="${LLM_MERGED_DIR}/${VIDEO_BASENAME}.summary.md"
+  MERGED_SUMMARY_RAW_JSON="${LLM_MERGED_DIR}/${VIDEO_BASENAME}.summary.raw.json"
 
   LOG_DIR="${WORKDIR}/logs"
   mkdir -p "$LOG_DIR" "$LLM_TEXT_DIR" "$LLM_CHUNKS_DIR" "$LLM_CORRECTED_DIR" "$LLM_MERGED_DIR"
@@ -1197,6 +1339,8 @@ setup_paths() {
   EXPORT_STDERR="${LOG_DIR}/export.stderr.log"
   CHATGPT_UPLOAD_STDERR="${LOG_DIR}/chatgpt_upload.stderr.log"
   CHATGPT_RUN_STDERR="${LOG_DIR}/chatgpt_run.stderr.log"
+  SUMMARY_UPLOAD_STDERR="${LOG_DIR}/summary_upload.stderr.log"
+  SUMMARY_RUN_STDERR="${LOG_DIR}/summary_run.stderr.log"
   IMPORT_STDOUT="${LOG_DIR}/import.stdout.log"
   IMPORT_STDERR="${LOG_DIR}/import.stderr.log"
   PDF_STDOUT="${LOG_DIR}/pdf.stdout.log"
@@ -1395,6 +1539,7 @@ compute_checkpoints() {
   SCREENSHOTS_NEEDED=1
   LLM_PIPELINE_NEEDED=1
   PDF_NEEDED=1
+  SUMMARY_NEEDED=1
 
   if [ "$FORCE_ALL" -eq 0 ] && [ "$SKIP_SCREENSHOTS" -eq 0 ]; then
     if [ -d "$SLIDES_DIR" ] && [ -f "${SLIDES_DIR}/slides.csv" ] && [ -s "${SLIDES_DIR}/slides.csv" ]; then
@@ -1411,6 +1556,17 @@ compute_checkpoints() {
       LLM_PIPELINE_NEEDED=0
     else
       log "Slide texts JSON da generare"
+    fi
+  fi
+
+  if [ "$SKIP_SUMMARY" -eq 1 ]; then
+    SUMMARY_NEEDED=0
+  elif [ "$FORCE_ALL" -eq 0 ]; then
+    if file_exists_nonempty "$MERGED_SUMMARY_MD"; then
+      log "Summary Markdown già presente, skip summary: $MERGED_SUMMARY_MD"
+      SUMMARY_NEEDED=0
+    else
+      log "Summary Markdown da generare"
     fi
   fi
 
@@ -1443,12 +1599,14 @@ SUB_LANGS="$SUB_LANGS"
 YTDLP_MODE="$YTDLP_MODE"
 COOKIES_FROM_BROWSER="$COOKIES_FROM_BROWSER"
 MODEL="$MODEL"
+SUMMARY_MODEL="$SUMMARY_MODEL"
 TEMPERATURE="$TEMPERATURE"
 MAX_OUTPUT_TOKENS="$MAX_OUTPUT_TOKENS"
 EFFORT="$EFFORT"
 SCRIPT_VERBOSITY="$SCRIPT_VERBOSITY"
 LLM_VERBOSITY="$LLM_VERBOSITY"
 PROMPT_FILE="$PROMPT_FILE"
+SUMMARY_PROMPT_FILE="$SUMMARY_PROMPT_FILE"
 WHISPER="$WHISPER"
 CONFIG_FILE="$CONFIG_FILE"
 DELETE_INTERMEDIATE_SRTS="$DELETE_INTERMEDIATE_SRTS"
@@ -1458,6 +1616,7 @@ SKIP_DOWNLOAD="$SKIP_DOWNLOAD"
 SKIP_SUBS="$SKIP_SUBS"
 SKIP_SCREENSHOTS="$SKIP_SCREENSHOTS"
 SKIP_LLM="$SKIP_LLM"
+SKIP_SUMMARY="$SKIP_SUMMARY"
 SKIP_PDF="$SKIP_PDF"
 FROM_STEP="$FROM_STEP"
 FORCE_ALL="$FORCE_ALL"
@@ -1472,9 +1631,10 @@ print_execution_plan() {
 DOWNLOAD VIDEO:     $( [ "$SKIP_DOWNLOAD" -eq 1 ] && echo SKIP || echo ACTIVE )
 LOCAL MKV IMPORT:   $( [ -n "$INPUT_MKV" ] && echo ACTIVE || echo SKIP )
 SRT INPUT:          $( [ "$SKIP_SUBS" -eq 1 ] && echo SKIP || { [ "$WHISPER" -eq 1 ] && echo "WHISPER ACTIVE" || echo "YTDLP SUBS ACTIVE"; } )
-SCREENSHOTS:        $( [ "$SKIP_SCREENSHOTS" -eq 1 ] && echo SKIP || echo ACTIVE )
-LLM PIPELINE:       $( [ "$SKIP_LLM" -eq 1 ] && echo SKIP || echo ACTIVE )
-PDF/DOCX:           $( [ "$SKIP_PDF" -eq 1 ] && echo SKIP || echo ACTIVE )
+SCREENSHOTS:        $( [ "$SKIP_SCREENSHOTS" -eq 1 ] && echo SKIP || { [ "$SCREENSHOTS_NEEDED" -eq 0 ] && echo "CHECKPOINT SKIP" || echo ACTIVE; } )
+LLM PIPELINE:       $( [ "$SKIP_LLM" -eq 1 ] && echo SKIP || { [ "$LLM_PIPELINE_NEEDED" -eq 0 ] && echo "CHECKPOINT SKIP" || echo ACTIVE; } )
+SUMMARY:            $( [ "$SKIP_SUMMARY" -eq 1 ] && echo SKIP || { [ "$SUMMARY_NEEDED" -eq 0 ] && echo "CHECKPOINT SKIP" || echo ACTIVE; } )
+PDF/DOCX:           $( [ "$SKIP_PDF" -eq 1 ] && echo SKIP || { [ "$PDF_NEEDED" -eq 0 ] && echo "CHECKPOINT SKIP" || echo ACTIVE; } )
 CHECKPOINTS FORZATI $( [ "$FORCE_ALL" -eq 1 ] && echo YES || echo NO )
 EOF
 }
@@ -1880,6 +2040,59 @@ run_llm_pipeline() {
   log "JSON finale slide texts pronto: $MERGED_SLIDE_TEXTS_JSON"
 }
 
+run_summary_pipeline() {
+  # Genera un summary Markdown a partire dal JSON finale slide_texts.
+  local upload_json=""
+  local file_id=""
+  local -a chatgpt_cmd
+
+  if [ "$SKIP_SUMMARY" -eq 1 ]; then
+    log "Summary finale skippato"
+    return 0
+  fi
+
+  if [ "$SUMMARY_NEEDED" -eq 0 ]; then
+    log "Summary finale non necessario"
+    return 0
+  fi
+
+  require_file "$MERGED_SLIDE_TEXTS_JSON"
+  require_openai_api_key
+  [ -n "$SUMMARY_PROMPT_TEXT" ] || die "SUMMARY_PROMPT_TEXT vuoto prima della generazione del summary"
+
+  log "Upload JSON finale a ChatGPT per il riassunto: $MERGED_SLIDE_TEXTS_JSON"
+  upload_json="$(run_chatgpt_upload "$MERGED_SLIDE_TEXTS_JSON" "$SUMMARY_UPLOAD_STDERR")"
+  file_id="$(extract_json_field_with_python "$upload_json" "id")"
+  [ -n "$file_id" ] || die "Impossibile estrarre file_id per il summary: $MERGED_SLIDE_TEXTS_JSON"
+
+  chatgpt_cmd=(
+    chatgpt
+    --no-resume
+    -o "$MERGED_SUMMARY_MD"
+    --file-id "$file_id"
+    -m "$SUMMARY_MODEL"
+    -t "$TEMPERATURE"
+    --verbosity "$LLM_VERBOSITY"
+  )
+
+  if [ -n "$MAX_OUTPUT_TOKENS" ]; then
+    chatgpt_cmd+=(-k "$MAX_OUTPUT_TOKENS")
+  fi
+
+  if [ -n "$EFFORT" ]; then
+    chatgpt_cmd+=(--effort "$EFFORT")
+  fi
+
+  chatgpt_cmd+=(--save-raw "$MERGED_SUMMARY_RAW_JSON")
+  chatgpt_cmd+=("$SUMMARY_PROMPT_TEXT")
+
+  log "Invio prompt di summary finale a ChatGPT..."
+  run_chatgpt_cmd_with_retry "$SUMMARY_RUN_STDERR" "${chatgpt_cmd[@]}"
+
+  require_file "$MERGED_SUMMARY_MD"
+  log "Summary Markdown pronto: $MERGED_SUMMARY_MD"
+}
+
 step_generate_pdf() {
   # Genera PDF e DOCX finali partendo da slide e JSON dei testi corretti.
   if [ "$SKIP_PDF" -eq 1 ]; then
@@ -1897,20 +2110,22 @@ step_generate_pdf() {
   require_file "$MERGED_SLIDE_TEXTS_JSON"
 
   log "Avvio slides_and_texts_to_pdf.py..."
+  local -a pdf_cmd=(
+    "$VENV_PYTHON" "${SCRIPT_DIR}/${PDF_SCRIPT}"
+    --input-dir "$SLIDES_DIR"
+    --csv "slides.csv"
+    --slide-texts "$MERGED_SLIDE_TEXTS_JSON"
+    --output-base "$VIDEO_BASENAME"
+  )
+
+  if file_exists_nonempty "$MERGED_SUMMARY_MD"; then
+    pdf_cmd+=(--summary-file "$MERGED_SUMMARY_MD")
+  fi
+
   if [ "$VERBOSE_LOGS" -eq 1 ]; then
-    run_logged_command "$PDF_STDOUT" "$PDF_STDERR" 1 \
-      "$VENV_PYTHON" "${SCRIPT_DIR}/${PDF_SCRIPT}" \
-      --input-dir "$SLIDES_DIR" \
-      --csv "slides.csv" \
-      --slide-texts "$MERGED_SLIDE_TEXTS_JSON" \
-      --output-base "$VIDEO_BASENAME"
+    run_logged_command "$PDF_STDOUT" "$PDF_STDERR" 1 "${pdf_cmd[@]}"
   else
-    "$VENV_PYTHON" "${SCRIPT_DIR}/${PDF_SCRIPT}" \
-      --input-dir "$SLIDES_DIR" \
-      --csv "slides.csv" \
-      --slide-texts "$MERGED_SLIDE_TEXTS_JSON" \
-      --output-base "$VIDEO_BASENAME" \
-      >"$PDF_STDOUT" 2>"$PDF_STDERR"
+    "${pdf_cmd[@]}" >"$PDF_STDOUT" 2>"$PDF_STDERR"
   fi
 
   move_final_outputs_to_workdir
@@ -1941,12 +2156,14 @@ PRESET_SUB_LANGS="$SUB_LANGS"
 PRESET_YTDLP_MODE="$YTDLP_MODE"
 PRESET_COOKIES_FROM_BROWSER="$COOKIES_FROM_BROWSER"
 PRESET_MODEL="$MODEL"
+PRESET_SUMMARY_MODEL="$SUMMARY_MODEL"
 PRESET_TEMPERATURE="$TEMPERATURE"
 PRESET_MAX_OUTPUT_TOKENS="$MAX_OUTPUT_TOKENS"
 PRESET_EFFORT="$EFFORT"
 PRESET_SCRIPT_VERBOSITY="$SCRIPT_VERBOSITY"
 PRESET_LLM_VERBOSITY="$LLM_VERBOSITY"
 PRESET_PROMPT_FILE="$PROMPT_FILE"
+PRESET_SUMMARY_PROMPT_FILE="$SUMMARY_PROMPT_FILE"
 PRESET_WHISPER="$WHISPER"
 
 # 1) parsing argomenti CLI
@@ -1982,12 +2199,14 @@ if [ -n "$CONFIG_FILE" ]; then
   CLI_YTDLP_MODE="$YTDLP_MODE"
   CLI_COOKIES_FROM_BROWSER="$COOKIES_FROM_BROWSER"
   CLI_MODEL="$MODEL"
+  CLI_SUMMARY_MODEL="$SUMMARY_MODEL"
   CLI_TEMPERATURE="$TEMPERATURE"
   CLI_MAX_OUTPUT_TOKENS="$MAX_OUTPUT_TOKENS"
   CLI_EFFORT="$EFFORT"
   CLI_SCRIPT_VERBOSITY="$SCRIPT_VERBOSITY"
   CLI_LLM_VERBOSITY="$LLM_VERBOSITY"
   CLI_PROMPT_FILE="$PROMPT_FILE"
+  CLI_SUMMARY_PROMPT_FILE="$SUMMARY_PROMPT_FILE"
   CLI_WHISPER="$WHISPER"
   CLI_DELETE_INTERMEDIATE_SRTS="$DELETE_INTERMEDIATE_SRTS"
   CLI_DELETE_RAW_JSON="$DELETE_RAW_JSON"
@@ -1996,6 +2215,7 @@ if [ -n "$CONFIG_FILE" ]; then
   CLI_SKIP_SUBS="$SKIP_SUBS"
   CLI_SKIP_SCREENSHOTS="$SKIP_SCREENSHOTS"
   CLI_SKIP_LLM="$SKIP_LLM"
+  CLI_SKIP_SUMMARY="$SKIP_SUMMARY"
   CLI_SKIP_PDF="$SKIP_PDF"
   CLI_FROM_STEP="$FROM_STEP"
   CLI_FORCE_ALL="$FORCE_ALL"
@@ -2019,12 +2239,14 @@ if [ -n "$CONFIG_FILE" ]; then
   YTDLP_MODE="$PRESET_YTDLP_MODE"
   COOKIES_FROM_BROWSER="$PRESET_COOKIES_FROM_BROWSER"
   MODEL="$PRESET_MODEL"
+  SUMMARY_MODEL="$PRESET_SUMMARY_MODEL"
   TEMPERATURE="$PRESET_TEMPERATURE"
   MAX_OUTPUT_TOKENS="$PRESET_MAX_OUTPUT_TOKENS"
   EFFORT="$PRESET_EFFORT"
   SCRIPT_VERBOSITY="$PRESET_SCRIPT_VERBOSITY"
   LLM_VERBOSITY="$PRESET_LLM_VERBOSITY"
   PROMPT_FILE="$PRESET_PROMPT_FILE"
+  SUMMARY_PROMPT_FILE="$PRESET_SUMMARY_PROMPT_FILE"
   WHISPER="$PRESET_WHISPER"
 
   load_config_file "$CONFIG_FILE"
@@ -2047,12 +2269,14 @@ if [ -n "$CONFIG_FILE" ]; then
   [ "$CLI_YTDLP_MODE" = "$PRESET_YTDLP_MODE" ] || YTDLP_MODE="$CLI_YTDLP_MODE"
   [ "$CLI_COOKIES_FROM_BROWSER" = "$PRESET_COOKIES_FROM_BROWSER" ] || COOKIES_FROM_BROWSER="$CLI_COOKIES_FROM_BROWSER"
   [ "$CLI_MODEL" = "$PRESET_MODEL" ] || MODEL="$CLI_MODEL"
+  [ "$CLI_SUMMARY_MODEL" = "$PRESET_SUMMARY_MODEL" ] || SUMMARY_MODEL="$CLI_SUMMARY_MODEL"
   [ "$CLI_TEMPERATURE" = "$PRESET_TEMPERATURE" ] || TEMPERATURE="$CLI_TEMPERATURE"
   [ "$CLI_MAX_OUTPUT_TOKENS" = "$PRESET_MAX_OUTPUT_TOKENS" ] || MAX_OUTPUT_TOKENS="$CLI_MAX_OUTPUT_TOKENS"
   [ "$CLI_EFFORT" = "$PRESET_EFFORT" ] || EFFORT="$CLI_EFFORT"
   [ "$CLI_SCRIPT_VERBOSITY" = "$PRESET_SCRIPT_VERBOSITY" ] || SCRIPT_VERBOSITY="$CLI_SCRIPT_VERBOSITY"
   [ "$CLI_LLM_VERBOSITY" = "$PRESET_LLM_VERBOSITY" ] || LLM_VERBOSITY="$CLI_LLM_VERBOSITY"
   [ "$CLI_PROMPT_FILE" = "$PRESET_PROMPT_FILE" ] || PROMPT_FILE="$CLI_PROMPT_FILE"
+  [ "$CLI_SUMMARY_PROMPT_FILE" = "$PRESET_SUMMARY_PROMPT_FILE" ] || SUMMARY_PROMPT_FILE="$CLI_SUMMARY_PROMPT_FILE"
   [ "$CLI_WHISPER" = "$PRESET_WHISPER" ] || WHISPER="$CLI_WHISPER"
 
   # Per le booleane, se da CLI sono state impostate a 1, sovrascrivono il config.
@@ -2063,6 +2287,7 @@ if [ -n "$CONFIG_FILE" ]; then
   [ "$CLI_SKIP_SUBS" -eq 0 ] || SKIP_SUBS=1
   [ "$CLI_SKIP_SCREENSHOTS" -eq 0 ] || SKIP_SCREENSHOTS=1
   [ "$CLI_SKIP_LLM" -eq 0 ] || SKIP_LLM=1
+  [ "$CLI_SKIP_SUMMARY" -eq 0 ] || SKIP_SUMMARY=1
   [ "$CLI_SKIP_PDF" -eq 0 ] || SKIP_PDF=1
   [ -z "$CLI_FROM_STEP" ] || FROM_STEP="$CLI_FROM_STEP"
   [ "$CLI_FORCE_ALL" -eq 0 ] || FORCE_ALL=1
@@ -2076,6 +2301,7 @@ check_dependencies
 resolve_inputs
 setup_paths
 refresh_prompt_text
+refresh_summary_prompt_text
 
 # 6) validazione URL solo se serve davvero yt-dlp
 if [ -n "$YOUTUBE_URL" ] && { [ "$SKIP_DOWNLOAD" -eq 0 ] || { [ "$SKIP_SUBS" -eq 0 ] && [ "$WHISPER" -eq 0 ]; }; }; then
@@ -2117,10 +2343,13 @@ if [ "$SKIP_LLM" -eq 0 ]; then
   require_file "$MERGED_SLIDE_TEXTS_JSON"
 fi
 
+run_summary_pipeline
+
 step_generate_pdf
 cleanup_intermediate_srts
 cleanup_raw_json_files
 cleanup_temp_files
+cleanup_pre_move_backups
 
 log "Pipeline completata."
 
@@ -2135,6 +2364,7 @@ echo "Output principali:"
 [ -d "$LLM_CHUNKS_DIR" ] && echo " - Chunk LLM: $LLM_CHUNKS_DIR"
 [ -d "$LLM_CORRECTED_DIR" ] && echo " - Chunk corretti: $LLM_CORRECTED_DIR"
 [ -f "$MERGED_SLIDE_TEXTS_JSON" ] && echo " - JSON finale slide texts: $MERGED_SLIDE_TEXTS_JSON"
+[ -f "$MERGED_SUMMARY_MD" ] && echo " - Summary Markdown: $MERGED_SUMMARY_MD"
 [ -f "$FINAL_PDF" ] && echo " - PDF: $FINAL_PDF"
 [ -f "$FINAL_DOCX" ] && echo " - DOCX: $FINAL_DOCX"
 echo " - Log: $LOG_DIR"

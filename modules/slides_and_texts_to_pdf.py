@@ -21,6 +21,7 @@ import sys
 import argparse
 import logging
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 from PIL import Image
@@ -139,6 +140,73 @@ def clean_final_text(text: str) -> str:
             paragraphs.append(p)
 
     return "\n".join(paragraphs).strip()
+
+
+def strip_markdown_inline(text: str) -> str:
+    # Riduce il markdown inline a testo semplice leggibile.
+    if not text:
+        return ""
+
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"__(.*?)__", r"\1", text)
+    text = re.sub(r"\*(.*?)\*", r"\1", text)
+    text = re.sub(r"_(.*?)_", r"\1", text)
+    return clean_final_text(text)
+
+
+def load_summary_markdown(md_path: Path | None) -> list[dict[str, Any]]:
+    # Legge un summary markdown semplice e lo trasforma in blocchi renderizzabili.
+    if md_path is None:
+        return []
+
+    logger.info(f"Leggo il summary Markdown: {md_path}")
+    raw = md_path.read_text(encoding="utf-8")
+    raw = raw.replace("\ufeff", "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    if not raw:
+        return []
+
+    blocks: list[dict[str, Any]] = []
+    paragraph_lines: list[str] = []
+
+    def flush_paragraph() -> None:
+        if not paragraph_lines:
+            return
+        text = strip_markdown_inline(" ".join(paragraph_lines))
+        if text:
+            blocks.append({"type": "paragraph", "text": text})
+        paragraph_lines.clear()
+
+    for raw_line in raw.split("\n"):
+        line = raw_line.strip()
+
+        if not line:
+            flush_paragraph()
+            continue
+
+        heading_match = re.match(r"^(#{1,3})\s+(.*)$", line)
+        if heading_match:
+            flush_paragraph()
+            level = min(len(heading_match.group(1)), 3)
+            text = strip_markdown_inline(heading_match.group(2))
+            if text:
+                blocks.append({"type": "heading", "level": level, "text": text})
+            continue
+
+        list_match = re.match(r"^[-*]\s+(.*)$", line)
+        if list_match:
+            flush_paragraph()
+            text = strip_markdown_inline(list_match.group(1))
+            if text:
+                blocks.append({"type": "list_item", "text": text})
+            continue
+
+        paragraph_lines.append(line)
+
+    flush_paragraph()
+    logger.info(f"Summary Markdown parsato: {len(blocks)} blocchi")
+    return blocks
 
 
 # =========================================================
@@ -429,6 +497,144 @@ def draw_summary_pages(c, page_w, page_h, entries, pdf_title, start_page_num):
     return page_num
 
 
+def build_summary_render_blocks(summary_blocks, page_w):
+    # Converte i blocchi markdown in righe con metriche adatte al PDF.
+    render_blocks = []
+    max_width = page_w - 72
+    current_section = ""
+
+    for block in summary_blocks:
+        block_type = block["type"]
+
+        if block_type == "heading":
+            level = int(block.get("level", 2))
+            current_section = block["text"].strip().lower()
+            if level <= 1:
+                font_name = "Helvetica-Bold"
+                font_size = 20
+                line_height = 26
+                spacing_before = 10
+                spacing_after = 12
+            elif level == 2:
+                font_name = "Helvetica-Bold"
+                font_size = 15
+                line_height = 20
+                spacing_before = 12
+                spacing_after = 6
+            else:
+                font_name = "Helvetica-Bold"
+                font_size = 12
+                line_height = 16
+                spacing_before = 6
+                spacing_after = 3
+
+            lines = wrap_text_to_width(block["text"], font_name, font_size, max_width)
+            render_blocks.append({
+                "type": "heading",
+                "lines": lines,
+                "font_name": font_name,
+                "font_size": font_size,
+                "line_height": line_height,
+                "spacing_before": spacing_before,
+                "spacing_after": spacing_after,
+                "indent": 0,
+                "accent": "implicazioni cliniche" in current_section,
+            })
+            continue
+
+        if block_type == "list_item":
+            text = f"- {block['text']}"
+            font_name = "Helvetica"
+            font_size = 11
+            line_height = 15
+            lines = wrap_text_to_width(text, font_name, font_size, max_width - 12)
+            render_blocks.append({
+                "type": "list_item",
+                "lines": lines,
+                "font_name": font_name,
+                "font_size": font_size,
+                "line_height": line_height,
+                "spacing_before": 3,
+                "spacing_after": 3,
+                "indent": 16,
+                "accent": False,
+            })
+            continue
+
+        font_name = "Helvetica"
+        font_size = 11
+        line_height = 16
+        is_clinical = "implicazioni cliniche" in current_section
+        indent = 12 if is_clinical else 0
+        width = max_width - 18 if is_clinical else max_width
+        lines = wrap_text_to_width(block["text"], font_name, font_size, width)
+        render_blocks.append({
+            "type": "paragraph",
+            "lines": lines,
+            "font_name": font_name,
+            "font_size": font_size,
+            "line_height": line_height,
+            "spacing_before": 3,
+            "spacing_after": 8,
+            "indent": indent,
+            "accent": is_clinical,
+        })
+
+    return render_blocks
+
+
+def draw_markdown_summary_pages(c, page_w, page_h, summary_blocks, pdf_title, start_page_num):
+    # Disegna il riassunto markdown su una o più pagine PDF.
+    if not summary_blocks:
+        return start_page_num
+
+    logger.info(f"Genero il summary PDF ({len(summary_blocks)} blocchi)")
+    render_blocks = build_summary_render_blocks(summary_blocks, page_w)
+
+    margin_left = 36
+    bottom_y = 32
+    page_num = start_page_num
+    i = 0
+
+    while i < len(render_blocks):
+        draw_header(c, page_w, page_h, pdf_title, "Riassunto")
+        draw_footer(c, page_w, page_h, page_num)
+
+        y = page_h - 60
+
+        while i < len(render_blocks):
+            block = render_blocks[i]
+            needed_h = block["spacing_before"] + len(block["lines"]) * block["line_height"] + block["spacing_after"]
+
+            if y - needed_h < bottom_y:
+                break
+
+            y -= block["spacing_before"]
+
+            if block.get("accent"):
+                line_top = y + 3
+                line_bottom = y - len(block["lines"]) * block["line_height"] - block["spacing_after"] + 4
+                c.setLineWidth(2)
+                c.setStrokeColorRGB(0.30, 0.42, 0.58)
+                c.line(margin_left - 8, line_top, margin_left - 8, line_bottom)
+                c.setLineWidth(1)
+                c.setStrokeColorRGB(0, 0, 0)
+
+            c.setFont(block["font_name"], block["font_size"])
+
+            for line in block["lines"]:
+                c.drawString(margin_left + block["indent"], y, line)
+                y -= block["line_height"]
+
+            y -= block["spacing_after"]
+            i += 1
+
+        c.showPage()
+        page_num += 1
+
+    return page_num
+
+
 def draw_slide_page(c, page_w, page_h, slide_path, text_lines, slide_num, time_range, page_num):
     # Disegna la pagina principale di una slide nel PDF:
     # - header
@@ -534,7 +740,7 @@ def draw_text_continuation_page(c, page_w, page_h, text_lines, slide_num, page_n
     return consumed
 
 
-def build_pdf(entries, input_dir: Path, output_pdf: Path):
+def build_pdf(entries, input_dir: Path, output_pdf: Path, summary_blocks=None):
     # Costruisce l'intero PDF finale.
     #
     # Flusso:
@@ -552,6 +758,7 @@ def build_pdf(entries, input_dir: Path, output_pdf: Path):
 
     page_num = 1
     page_num = draw_summary_pages(c, page_w, page_h, entries, pdf_title, page_num)
+    page_num = draw_markdown_summary_pages(c, page_w, page_h, summary_blocks or [], pdf_title, page_num)
 
     logger.info(f"Genero le pagine DOCX delle slide ({len(entries)} totali)")
 
@@ -668,6 +875,62 @@ def add_docx_summary(document: Document, entries, title: str):
     document.add_page_break()
 
 
+def add_docx_markdown_summary(document: Document, summary_blocks):
+    # Aggiunge il riassunto markdown al DOCX con una resa semplice e leggibile.
+    if not summary_blocks:
+        return
+
+    logger.info(f"Aggiungo summary DOCX ({len(summary_blocks)} blocchi)")
+    current_section = ""
+
+    for block in summary_blocks:
+        block_type = block["type"]
+        text = block["text"]
+
+        if block_type == "heading":
+            level = int(block.get("level", 2))
+            current_section = text.strip().lower()
+            p = document.add_paragraph()
+            r = p.add_run(text)
+            r.bold = True
+            if level <= 1:
+                r.font.size = Pt(18)
+                p.paragraph_format.space_before = Pt(4)
+                p.paragraph_format.space_after = Pt(10)
+            elif level == 2:
+                r.font.size = Pt(14)
+                p.paragraph_format.space_before = Pt(8)
+                p.paragraph_format.space_after = Pt(5)
+            else:
+                r.font.size = Pt(11)
+                p.paragraph_format.space_before = Pt(4)
+                p.paragraph_format.space_after = Pt(3)
+            if "implicazioni cliniche" in current_section:
+                p.paragraph_format.left_indent = Inches(0.12)
+            continue
+
+        if block_type == "list_item":
+            try:
+                p = document.add_paragraph(style="List Bullet")
+            except KeyError:
+                p = document.add_paragraph()
+                p.add_run("- ")
+            p.add_run(text)
+            p.paragraph_format.space_after = Pt(3)
+            for run in p.runs:
+                run.font.size = Pt(11)
+            continue
+
+        p = document.add_paragraph(text)
+        p.paragraph_format.space_after = Pt(8)
+        if "implicazioni cliniche" in current_section:
+            p.paragraph_format.left_indent = Inches(0.18)
+        for run in p.runs:
+            run.font.size = Pt(11)
+
+    document.add_page_break()
+
+
 def add_slide_block_docx(document: Document, slide_num: int, slide_path: Path, text: str, max_image_width_inches: float):
     # Aggiunge al DOCX un blocco completo per una slide:
     # - titolo slide
@@ -706,7 +969,7 @@ def add_slide_block_docx(document: Document, slide_num: int, slide_path: Path, t
     document.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
 
 
-def build_docx(entries, input_dir: Path, output_docx: Path):
+def build_docx(entries, input_dir: Path, output_docx: Path, summary_blocks=None):
     # Costruisce il DOCX finale.
     #
     # Flusso:
@@ -721,6 +984,7 @@ def build_docx(entries, input_dir: Path, output_docx: Path):
 
     title = output_docx.stem.replace("_", " ").replace("-", " ")
     add_docx_summary(doc, entries, title)
+    add_docx_markdown_summary(doc, summary_blocks or [])
 
     # Larghezza massima immagine leggermente inferiore alla larghezza utile
     # per evitare che l'immagine tocchi troppo i bordi.
@@ -776,6 +1040,10 @@ def main():
         help="Path del file JSON con il testo finale per slide",
     )
     parser.add_argument(
+        "--summary-file",
+        help="Path opzionale del file Markdown con il riassunto finale",
+    )
+    parser.add_argument(
         "--output-base",
         default="slides_con_testo",
         help="Nome base output senza estensione",
@@ -795,12 +1063,14 @@ def main():
     logger.info(f"Cartella input: {input_dir}")
     csv_path = input_dir / args.csv
     slide_texts_path = Path(args.slide_texts).expanduser().resolve()
+    summary_path = Path(args.summary_file).expanduser().resolve() if args.summary_file else None
 
     output_pdf = input_dir / f"{args.output_base}.pdf"
     output_docx = input_dir / f"{args.output_base}.docx"
 
     logger.info(f"CSV atteso: {csv_path}")
     logger.info(f"JSON testi: {slide_texts_path}")
+    logger.info(f"Summary:     {summary_path if summary_path else '[assente]'}")
     logger.info(f"Output PDF:  {output_pdf}")
     logger.info(f"Output DOCX: {output_docx}")
 
@@ -813,6 +1083,9 @@ def main():
 
     if not slide_texts_path.exists():
         raise FileNotFoundError(f"JSON slide texts non trovato: {slide_texts_path}")
+
+    if summary_path is not None and not summary_path.exists():
+        raise FileNotFoundError(f"Summary file non trovato: {summary_path}")
 
     # Lettura CSV.
     logger.info(f"Leggo il CSV slide: {csv_path}")
@@ -827,11 +1100,12 @@ def main():
     # Lettura testi e costruzione struttura unificata.
     slide_text_map = load_slide_texts_json(slide_texts_path)
     entries = build_entries_from_csv_and_json(slides_df, slide_text_map)
+    summary_blocks = load_summary_markdown(summary_path)
 
     # Generazione output finali.
     logger.info("Inizio generazione artefatti finali")
-    build_pdf(entries, input_dir, output_pdf)
-    build_docx(entries, input_dir, output_docx)
+    build_pdf(entries, input_dir, output_pdf, summary_blocks=summary_blocks)
+    build_docx(entries, input_dir, output_docx, summary_blocks=summary_blocks)
 
     logger.info("Elaborazione completata")
     print(f"PDF creato:  {output_pdf}")
