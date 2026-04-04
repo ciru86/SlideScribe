@@ -56,12 +56,13 @@
    - chunk testuali preparati per l’LLM
    - chunk corretti dall’LLM
    - JSON finale con il testo associato a ciascuna slide
+   - summary finale in Markdown generato dal JSON merged
    - PDF finale
    - DOCX finale
 
    In pratica la pipeline è:
 
-   **YouTube oppure MKV locale → video locale / SRT → estrazione slide → dedup SRT → inferenza automatica metadata prompt → export per LLM → correzione chunk → merge finale → PDF/DOCX**
+   **YouTube oppure MKV locale → video locale / SRT → estrazione slide → dedup SRT → inferenza automatica metadata prompt → export per LLM → correzione chunk → merge finale → summary Markdown → PDF/DOCX**
 
    ------
 
@@ -79,7 +80,8 @@
    6. divide il testo in chunk gestibili dall’LLM
    7. corregge i chunk via ChatGPT
    8. ricompone il materiale in un JSON finale
-   9. genera PDF e DOCX con slide + testo
+   9. genera un riassunto finale in Markdown a partire dal JSON merged
+   10. genera PDF e DOCX con indice + summary + slide + testo
 
    L’orchestratore è scritto in Bash e coordina moduli Python e tool esterni.
 
@@ -103,7 +105,7 @@
    - **Python modules**: lavorazioni specializzate
    - **yt-dlp**: download video e sottotitoli quando la sorgente è YouTube
    - **OpenAI Whisper + ffmpeg**: generazione SRT da file `.mkv` locale o da video già disponibile
-   - **chatgpt wrapper**: upload file, inferenza metadata lezione e correzione LLM
+   - **chatgpt wrapper**: upload file, inferenza metadata lezione, correzione LLM e summary finale
 
    ------
 
@@ -198,9 +200,17 @@
 
    - `WORKDIR/llm_merged/VIDEO_BASENAME.slide_texts.json`
 
-   ### 8. Generazione PDF e DOCX
+   ### 8. Generazione summary finale
 
-   Il modulo `slides_and_texts_to_pdf.py` usa cartella slide, `slides.csv` e JSON finale per creare i documenti finali.
+   Dopo il merge finale, Slidescribe carica `VIDEO_BASENAME.slide_texts.json` al wrapper `chatgpt`, genera un summary finale in Markdown e lo salva in `llm_merged`.
+
+   Output intermedio:
+
+   - `WORKDIR/llm_merged/VIDEO_BASENAME.summary.md`
+
+   ### 9. Generazione PDF e DOCX
+
+   Il modulo `slides_and_texts_to_pdf.py` usa cartella slide, `slides.csv`, JSON finale e, se presente, il summary Markdown per creare i documenti finali.
 
    Output finali:
 
@@ -243,6 +253,7 @@
    INPUT_MKV=""
    VIDEO_BASENAME="lezione1"
    MODEL="gpt-5.4"
+   SUMMARY_MODEL=""
    TEMPERATURE="0.3"
    ROI_MODE="shared"
    ```
@@ -261,6 +272,7 @@
 
    - la presenza di `slides.csv` e cartella slide vale come checkpoint per la fase screenshot
    - la presenza del JSON merged vale come checkpoint per la pipeline LLM
+   - la presenza di `llm_merged/*.summary.md` vale come checkpoint per la generazione del summary finale
    - la presenza di PDF e DOCX finali vale come checkpoint per il rendering finale
 
    ### Skip e restart
@@ -271,6 +283,7 @@
 
    - rifare solo la parte screenshot in poi
    - rifare solo la parte LLM
+   - rigenerare solo il summary finale a partire dal JSON merged
    - rigenerare solo PDF/DOCX
 
    ### Force
@@ -327,6 +340,18 @@
 
    Se viene fornito `--prompt-file`, il prompt built-in viene sostituito completamente. Se viene fornito contesto terminologico manuale, questo viene integrato nel prompt senza passare dall’inferenza automatica completa.
 
+   Per il summary finale esiste un secondo prompt dedicato, anch’esso sostituibile via `--summary-prompt-file`. Di default il summary:
+
+   - usa lo stesso modello della pipeline LLM, salvo override via `--summary-model`
+   - legge `llm_merged/*.slide_texts.json`
+   - produce `llm_merged/*.summary.md`
+   - restituisce Markdown semplice con sezioni:
+     - `Panoramica`
+     - `Punti chiave`
+     - `Implicazioni cliniche`
+     - `Conclusione`
+   - vieta emoji, tabelle, blocchi di codice, HTML e markdown complesso
+
    ------
 
    ## Directory e output
@@ -358,7 +383,10 @@
    │   ├── lezione1.chunk_*.corrected.txt
    │   └── [eventuali raw json]
    ├── llm_merged/
-   │   └── lezione1.slide_texts.json
+   │   ├── lezione1.slide_texts.json
+   │   ├── lezione1.slide_texts.txt
+   │   ├── lezione1.summary.md
+   │   └── [eventuale summary raw json]
    └── logs/
        └── [log separati per fase]
    ```
@@ -367,6 +395,7 @@
 
    - PDF e DOCX vengono creati prima nella cartella slide
    - poi vengono spostati nella `WORKDIR`
+   - eventuali backup `*.pre-move.*` vengono rimossi automaticamente a fine pipeline completata
 
    ------
 
@@ -385,6 +414,7 @@
    - upload ChatGPT
    - run ChatGPT
    - merge finale
+   - generazione summary finale
    - generazione PDF/DOCX
 
    Questo rende molto più facile capire dove la pipeline ha fallito.
@@ -1505,7 +1535,7 @@
 
    ## slides_and_texts_to_pdf.py
 
-   Modulo finale della pipeline, incaricato di prendere la timeline delle slide (`slides.csv`), il testo finale per slide (`slide_texts.json`) e le immagini delle slide, e trasformare tutto in due documenti consultabili: un PDF e un DOCX. Non fa più validazione strutturale della fase LLM e non riassegna il testo alle slide: in questa fase il materiale è considerato già consolidato e viene impaginato in un formato leggibile per uso umano.
+   Modulo finale della pipeline, incaricato di prendere la timeline delle slide (`slides.csv`), il testo finale per slide (`slide_texts.json`), il summary Markdown opzionale (`summary.md`) e le immagini delle slide, e trasformare tutto in due documenti consultabili: un PDF e un DOCX. Non fa più validazione strutturale della fase LLM e non riassegna il testo alle slide: in questa fase il materiale è considerato già consolidato e viene impaginato in un formato leggibile per uso umano.
 
    ### Funzione del modulo
 
@@ -1515,9 +1545,10 @@
 
    1. legge il CSV delle slide
    2. legge il JSON finale con i testi
-   3. unisce metadati slide e testo in una struttura unica
-   4. genera un PDF orizzontale con immagine slide + testo
-   5. genera un DOCX orizzontale con la stessa logica
+   3. legge opzionalmente il summary Markdown finale
+   4. unisce metadati slide e testo in una struttura unica
+   5. genera un PDF orizzontale con indice, summary, immagine slide + testo
+   6. genera un DOCX orizzontale con la stessa logica
 
    È quindi il punto in cui la pipeline smette di produrre artefatti tecnici intermedi e costruisce documenti finali realmente fruibili.
 
@@ -1527,12 +1558,14 @@
 
    - cartella input contenente `slides.csv` e le immagini slide
    - file JSON con il testo finale per slide
+   - opzionalmente file Markdown con il riassunto finale
 
    Parametri CLI principali:
 
    - `--input-dir`: cartella delle slide
    - `--csv`: nome del file CSV delle slide
    - `--slide-texts`: path del JSON finale
+   - `--summary-file`: path opzionale del summary Markdown
    - `--output-base`: nome base dei file output
 
    Dal punto di vista logico il modulo si aspetta tre sorgenti coerenti tra loro:
@@ -1540,6 +1573,10 @@
    - immagini slide
    - CSV con indice/timestamp/filename
    - JSON con mappa `slide_index -> text`
+
+   A queste può aggiungersi una quarta sorgente opzionale:
+
+   - Markdown con riassunto finale della lezione
 
    Se una di queste tre componenti è incoerente o incompleta, la resa finale degrada o fallisce.
 
@@ -1555,6 +1592,7 @@
    La struttura del contenuto è la stessa in entrambi i formati:
 
    - pagina iniziale con sommario / indice
+   - summary tra indice e slide, se `--summary-file` è presente
    - per ogni slide:
      - numero slide
      - timestamp
@@ -1573,6 +1611,7 @@
    - `export_for_llm.py` costruisce i chunk
    - l’LLM corregge i chunk
    - `import_corrected_for_pdf_docx.py` ricompone il JSON finale
+   - Slidescribe genera `llm_merged/*.summary.md` dal JSON merged
    - `slides_and_texts_to_pdf.py` rende il risultato in PDF e DOCX
 
    Quindi il suo ruolo non è “capire” nulla di nuovo, ma presentare ordinatamente ciò che a monte è già stato deciso.
@@ -1582,13 +1621,14 @@
    Il flusso del modulo è questo:
 
    1. parse argomenti CLI
-   2. verifica esistenza di directory, CSV e JSON
+   2. verifica esistenza di directory, CSV, JSON e summary se richiesto
    3. legge il CSV con `pandas`
    4. legge il JSON e costruisce la mappa `slide_index -> text`
-   5. combina CSV e JSON in una lista ordinata di entry
-   6. costruisce il PDF
-   7. costruisce il DOCX
-   8. stampa i path finali creati
+   5. legge e parse il summary Markdown, se presente
+   6. combina CSV e JSON in una lista ordinata di entry
+   7. costruisce il PDF
+   8. costruisce il DOCX
+   9. stampa i path finali creati
 
    L’idea è semplice: creare una rappresentazione intermedia unica delle slide e poi usarla per due renderer diversi.
 
@@ -1678,6 +1718,23 @@
      - filename immagine
 
    Se le slide sono molte, il sommario continua su più pagine.
+
+   #### Summary PDF
+
+   Se viene passato `--summary-file`, il modulo legge un Markdown volutamente semplice e lo inserisce subito dopo l’indice.
+
+   Il parser supporta in modo controllato:
+
+   - heading `#`, `##`, `###`
+   - paragrafi
+   - liste puntate `-` o `*`
+   - enfasi inline semplice, convertita a testo pulito
+
+   La resa grafica resta sobria e stabile:
+
+   - titolo del summary più evidente
+   - sezioni con maggiore gerarchia visiva
+   - `Implicazioni cliniche` evidenziata con un richiamo discreto
 
    #### Pagina slide PDF
 
@@ -1778,6 +1835,18 @@
 
    È l’equivalente del sommario PDF, ma in una forma più semplice.
 
+   #### Summary DOCX
+
+   Se viene passato un summary Markdown, `add_docx_markdown_summary()` lo inserisce tra indice e slide.
+
+   Anche qui viene supportato un Markdown ristretto:
+
+   - heading
+   - paragrafi
+   - bullet list
+
+   La sezione `Implicazioni cliniche` riceve un rientro dedicato per risultare più immediatamente leggibile durante la consultazione.
+
    #### Blocco slide DOCX
 
    Ogni slide viene aggiunta con `add_slide_block_docx()`.
@@ -1829,12 +1898,18 @@
    - normalizza righe e spazi
    - pulisce piccole anomalie prima del rendering
 
+   #### `load_summary_markdown()`
+
+   Legge il file `summary.md` e lo converte in una lista di blocchi renderizzabili, limitando volutamente il supporto Markdown agli elementi davvero utili per la pipeline.
+
    ### Funzioni principali
 
    Le funzioni più importanti del modulo sono:
 
    - `load_slide_texts_json()`
      Legge e valida il JSON finale con i testi per slide.
+   - `load_summary_markdown()`
+     Legge e normalizza il summary Markdown opzionale.
    - `build_entries_from_csv_and_json()`
      Unisce CSV e JSON in una lista canonica di entry.
    - `wrap_text_to_width()`
@@ -1843,6 +1918,8 @@
      Adatta l’immagine allo spazio disponibile nel PDF.
    - `draw_summary_pages()`
      Disegna il sommario iniziale del PDF.
+   - `draw_markdown_summary_pages()`
+     Disegna il summary iniziale del PDF.
    - `draw_slide_page()`
      Disegna la pagina principale di una slide nel PDF.
    - `draw_text_continuation_page()`
@@ -1853,6 +1930,8 @@
      Imposta il documento Word in orizzontale.
    - `add_docx_summary()`
      Costruisce il sommario del DOCX.
+   - `add_docx_markdown_summary()`
+     Inserisce il summary Markdown nel DOCX.
    - `add_slide_block_docx()`
      Aggiunge una slide con immagine e testo nel DOCX.
    - `build_docx()`
@@ -1883,7 +1962,7 @@
    - gestione conservativa del testo finale
    - fallback espliciti se mancano immagini o testo
 
-   In pratica è un buon modulo finale: non pretende di essere intelligente, ma è abbastanza robusto da produrre documenti leggibili in molti casi reali.
+   In pratica è un buon modulo finale: non pretende di essere intelligente, ma è abbastanza robusto da produrre documenti leggibili in molti casi reali, ora anche con una sezione summary iniziale adatta alla consultazione clinica rapida.
 
    ### Limiti pratici
 
