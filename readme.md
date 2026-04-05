@@ -63,7 +63,7 @@
    - corregge i chunk via ChatGPT
    - ricompone il materiale in un JSON finale con il testo associato a ciascuna slide
    - genera un summary finale in Markdown a partire dal JSON merged
-   - genera PDF e DOCX con indice + summary + slide + testo
+   - genera PDF e DOCX con cover iniziale, summary, slide + testo e indice finale
 
    In pratica la pipeline è:
 
@@ -196,7 +196,7 @@
 
    ### 9. Generazione PDF e DOCX
 
-   Il modulo `slides_and_texts_to_pdf.py` usa cartella slide, `slides.csv`, JSON finale e, se presente, il summary Markdown per creare i documenti finali.
+   Il modulo `slides_and_texts_to_pdf.py` usa cartella slide, `slides.csv`, JSON finale e, se presente, il summary Markdown per creare i documenti finali. Se la pipeline è partita da un link YouTube, l’URL viene passato al renderer e mostrato nella cover iniziale.
 
    Output finali:
 
@@ -1533,7 +1533,7 @@
    2. legge il JSON finale con i testi
    3. legge opzionalmente il summary Markdown finale
    4. unisce metadati slide e testo in una struttura unica
-   5. genera un PDF orizzontale con indice, summary, immagine slide + testo
+   5. genera un PDF orizzontale con cover iniziale, summary, immagine slide + testo e indice finale
    6. genera un DOCX orizzontale con la stessa logica
 
    È quindi il punto in cui la pipeline smette di produrre artefatti tecnici intermedi e costruisce documenti finali realmente fruibili.
@@ -1552,6 +1552,7 @@
    - `--csv`: nome del file CSV delle slide
    - `--slide-texts`: path del JSON finale
    - `--summary-file`: path opzionale del summary Markdown
+   - `--youtube-url`: URL YouTube opzionale da mostrare nella cover iniziale
    - `--output-base`: nome base dei file output
 
    Dal punto di vista logico il modulo si aspetta tre sorgenti coerenti tra loro:
@@ -1577,13 +1578,14 @@
 
    La struttura del contenuto è la stessa in entrambi i formati:
 
-   - pagina iniziale con sommario / indice
-   - summary tra indice e slide, se `--summary-file` è presente
+   - cover iniziale con titolo, numero slide e URL YouTube se disponibile
+   - summary dopo la cover, se `--summary-file` è presente
    - per ogni slide:
      - numero slide
      - timestamp
      - immagine
      - testo associato
+   - indice finale con slide, timestamp e filename
 
    Nel PDF possono esserci pagine aggiuntive di continuazione se il testo della slide è troppo lungo per stare nella stessa pagina dell’immagine.
 
@@ -1686,9 +1688,19 @@
 
    Il PDF ha questa struttura:
 
-   1. una o più pagine iniziali di sommario
-   2. una pagina per ciascuna slide con immagine + testo
-   3. eventuali pagine aggiuntive di continuazione testo
+   1. cover iniziale
+   2. eventuale summary
+   3. una pagina per ciascuna slide con immagine + testo
+   4. eventuali pagine aggiuntive di continuazione testo
+   5. una o più pagine finali di indice
+
+   #### Cover PDF
+
+   La prima pagina viene generata da una cover dedicata che mostra:
+
+   - titolo del documento
+   - numero totale di slide
+   - URL YouTube in evidenza, se disponibile
 
    #### Sommario PDF
 
@@ -1707,7 +1719,7 @@
 
    #### Summary PDF
 
-   Se viene passato `--summary-file`, il modulo legge un Markdown volutamente semplice e lo inserisce subito dopo l’indice.
+   Se viene passato `--summary-file`, il modulo legge un Markdown volutamente semplice e lo inserisce subito dopo la cover.
 
    Il parser supporta in modo controllato:
 
@@ -1792,12 +1804,14 @@
    La logica del DOCX è più semplice del PDF:
 
    1. imposta la pagina in orizzontale
-   2. aggiunge un sommario iniziale
-   3. per ogni slide aggiunge:
+   2. aggiunge una cover iniziale
+   3. aggiunge il summary, se presente
+   4. per ogni slide aggiunge:
       - titolo slide
       - immagine
       - testo
       - page break
+   5. aggiunge l’indice finale
 
    In altre parole, il DOCX privilegia semplicità e leggibilità, non una micro-impaginazione fine come nel PDF.
 
@@ -1810,9 +1824,18 @@
 
    Questo aumenta lo spazio utile per slide e testo.
 
+   #### Cover DOCX
+
+   La funzione `add_docx_cover()` costruisce una prima pagina con:
+
+   - titolo del documento
+   - numero slide
+   - URL YouTube se disponibile
+   - page break finale
+
    #### Sommario DOCX
 
-   La funzione `add_docx_summary()` costruisce una prima sezione con:
+   La funzione `add_docx_summary()` costruisce una sezione finale con:
 
    - titolo del documento
    - numero slide
@@ -1823,7 +1846,7 @@
 
    #### Summary DOCX
 
-   Se viene passato un summary Markdown, `add_docx_markdown_summary()` lo inserisce tra indice e slide.
+   Se viene passato un summary Markdown, `add_docx_markdown_summary()` lo inserisce tra cover e slide.
 
    Anche qui viene supportato un Markdown ristretto:
 
@@ -1903,9 +1926,11 @@
    - `fit_image_in_box()`
      Adatta l’immagine allo spazio disponibile nel PDF.
    - `draw_summary_pages()`
-     Disegna il sommario iniziale del PDF.
+     Disegna l’indice finale del PDF.
    - `draw_markdown_summary_pages()`
      Disegna il summary iniziale del PDF.
+   - `draw_cover_page()`
+     Disegna la cover iniziale del PDF.
    - `draw_slide_page()`
      Disegna la pagina principale di una slide nel PDF.
    - `draw_text_continuation_page()`
@@ -1914,8 +1939,10 @@
      Coordina l’intera generazione del PDF.
    - `set_landscape()`
      Imposta il documento Word in orizzontale.
+   - `add_docx_cover()`
+     Costruisce la cover iniziale del DOCX.
    - `add_docx_summary()`
-     Costruisce il sommario del DOCX.
+     Costruisce l’indice finale del DOCX.
    - `add_docx_markdown_summary()`
      Inserisce il summary Markdown nel DOCX.
    - `add_slide_block_docx()`
