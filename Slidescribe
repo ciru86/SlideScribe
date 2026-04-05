@@ -2122,6 +2122,10 @@ step_generate_pdf() {
     pdf_cmd+=(--summary-file "$MERGED_SUMMARY_MD")
   fi
 
+  if [ -n "$YOUTUBE_URL" ]; then
+    pdf_cmd+=(--youtube-url "$YOUTUBE_URL")
+  fi
+
   if [ "$VERBOSE_LOGS" -eq 1 ]; then
     run_logged_command "$PDF_STDOUT" "$PDF_STDERR" 1 "${pdf_cmd[@]}"
   else
