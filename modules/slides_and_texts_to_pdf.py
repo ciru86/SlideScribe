@@ -434,15 +434,15 @@ def draw_cover_page(c, page_w, page_h, pdf_title, total_slides, source_url, page
     draw_footer(c, page_w, page_h, page_num)
 
     center_x = page_w / 2
-    y = page_h - 90
+    y = page_h - 120
 
-    c.setFont("Helvetica-Bold", 24)
+    c.setFont("Helvetica-Bold", 30)
     c.drawCentredString(center_x, y, pdf_title)
-    y -= 34
-
-    c.setFont("Helvetica", 13)
-    c.drawCentredString(center_x, y, f"Numero slide: {total_slides}")
     y -= 42
+
+    c.setFont("Helvetica", 14)
+    c.drawCentredString(center_x, y, f"Numero slide: {total_slides}")
+    y -= 54
 
     if source_url:
         c.setFont("Helvetica-Bold", 13)
