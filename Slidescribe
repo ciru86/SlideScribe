@@ -195,6 +195,12 @@ require_openai_api_key() {
     source "$HOME/.secrets"
   fi
 
+  # Propaga la chiave anche ai processi figli se il file segreti
+  # la definisce senza `export`.
+  if [ -n "${OPENAI_API_KEY:-}" ]; then
+    export OPENAI_API_KEY
+  fi
+
   [ -n "${OPENAI_API_KEY:-}" ] || die "OPENAI_API_KEY non impostata"
 }
 
@@ -1767,6 +1773,7 @@ step_download_subs() {
 
   if [ "$WHISPER" -eq 1 ]; then
     require_file "$VIDEO_PATH"
+    require_openai_api_key
     log "Generazione SRT via Whisper..."
     run_logged_command "$WHISPER_STDOUT" "$WHISPER_STDERR" 1 \
       "$VENV_PYTHON" "${SCRIPT_DIR}/${WHISPER_SCRIPT}" \
@@ -1970,6 +1977,7 @@ run_llm_pipeline() {
   local file_id
   local raw_json_path
   local -a chatgpt_cmd
+  local -a existing_chunk_files
 
   if [ "$SKIP_LLM" -eq 1 ]; then
     log "Pipeline LLM skippata"
@@ -1988,27 +1996,35 @@ run_llm_pipeline() {
   prepare_lesson_context_from_srt
   [ -n "$PROMPT_TEXT" ] || die "PROMPT_TEXT vuoto dopo la preparazione del contesto lezione"
 
-  log "Avvio export_for_llm.py..."
-  if [ "$VERBOSE_LOGS" -eq 1 ]; then
-    run_logged_command "$EXPORT_STDOUT" "$EXPORT_STDERR" 1 \
-      "$VENV_PYTHON" "${SCRIPT_DIR}/${EXPORT_SCRIPT}" \
-      --srt "$ORIGINAL_SRT" \
-      --slides-csv "$slides_csv" \
-      --output-dir "$LLM_CHUNKS_DIR" \
-      --base-name "$VIDEO_BASENAME" \
-      --chunk-size "$CHUNK_SIZE" \
-      --skip-first-sec "$SKIP_FIRST_SEC" \
-      --skip-last-sec "$SKIP_LAST_SEC"
+  shopt -s nullglob
+  existing_chunk_files=( "$LLM_CHUNKS_DIR"/"${VIDEO_BASENAME}".chunk_*.txt )
+  shopt -u nullglob
+
+  if [ "$FORCE_ALL" -eq 0 ] && [ "${#existing_chunk_files[@]}" -gt 0 ]; then
+    log "Chunk export già presenti, skip export_for_llm.py: $LLM_CHUNKS_DIR"
   else
-    "$VENV_PYTHON" "${SCRIPT_DIR}/${EXPORT_SCRIPT}" \
-      --srt "$ORIGINAL_SRT" \
-      --slides-csv "$slides_csv" \
-      --output-dir "$LLM_CHUNKS_DIR" \
-      --base-name "$VIDEO_BASENAME" \
-      --chunk-size "$CHUNK_SIZE" \
-      --skip-first-sec "$SKIP_FIRST_SEC" \
-      --skip-last-sec "$SKIP_LAST_SEC" \
-      >"$EXPORT_STDOUT" 2>"$EXPORT_STDERR"
+    log "Avvio export_for_llm.py..."
+    if [ "$VERBOSE_LOGS" -eq 1 ]; then
+      run_logged_command "$EXPORT_STDOUT" "$EXPORT_STDERR" 1 \
+        "$VENV_PYTHON" "${SCRIPT_DIR}/${EXPORT_SCRIPT}" \
+        --srt "$ORIGINAL_SRT" \
+        --slides-csv "$slides_csv" \
+        --output-dir "$LLM_CHUNKS_DIR" \
+        --base-name "$VIDEO_BASENAME" \
+        --chunk-size "$CHUNK_SIZE" \
+        --skip-first-sec "$SKIP_FIRST_SEC" \
+        --skip-last-sec "$SKIP_LAST_SEC"
+    else
+      "$VENV_PYTHON" "${SCRIPT_DIR}/${EXPORT_SCRIPT}" \
+        --srt "$ORIGINAL_SRT" \
+        --slides-csv "$slides_csv" \
+        --output-dir "$LLM_CHUNKS_DIR" \
+        --base-name "$VIDEO_BASENAME" \
+        --chunk-size "$CHUNK_SIZE" \
+        --skip-first-sec "$SKIP_FIRST_SEC" \
+        --skip-last-sec "$SKIP_LAST_SEC" \
+        >"$EXPORT_STDOUT" 2>"$EXPORT_STDERR"
+    fi
   fi
 
   expected_slides="$(count_slides_from_csv "$slides_csv")"

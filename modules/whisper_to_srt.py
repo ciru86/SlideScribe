@@ -10,7 +10,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
@@ -127,6 +126,57 @@ def format_timestamp(seconds: float) -> str:
 
 def normalize_text(text: str) -> str:
     return " ".join(text.replace("\r", " ").replace("\n", " ").split()).strip()
+
+
+def get_file_signature(path: Path) -> Dict[str, Any]:
+    stat = path.stat()
+    return {
+        "path": str(path),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def load_json(path: Path) -> Dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def save_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def build_workspace_manifest(
+    input_video: Path,
+    output_srt: Path,
+    args: argparse.Namespace,
+) -> Dict[str, Any]:
+    return {
+        "input_video": get_file_signature(input_video),
+        "output_srt": str(output_srt),
+        "model": args.model,
+        "language": args.language,
+        "target_size_mb": args.target_size_mb,
+        "audio_bitrate": args.audio_bitrate,
+        "max_chunk_duration_sec": args.max_chunk_duration_sec,
+    }
+
+
+def ensure_workspace(workspace_dir: Path, manifest: Dict[str, Any]) -> Path:
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = workspace_dir / "manifest.json"
+
+    if manifest_path.is_file():
+        try:
+            existing_manifest = load_json(manifest_path)
+        except Exception:
+            existing_manifest = {}
+        if existing_manifest != manifest:
+            eprint("[INFO] Workspace Whisper esistente non compatibile con l'input corrente: pulizia cache locale.")
+            shutil.rmtree(workspace_dir)
+            workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    save_json(manifest_path, manifest)
+    return manifest_path
 
 
 def encode_optimized_audio(input_video: Path, output_audio: Path, bitrate: str) -> None:
@@ -272,6 +322,29 @@ def transcribe_file(client: Any, path: Path, model: str, language: str, prompt: 
     return response_to_dict(response)
 
 
+def transcribe_file_cached(
+    client: Any,
+    path: Path,
+    cache_path: Path,
+    model: str,
+    language: str,
+    prompt: str,
+) -> Dict[str, Any]:
+    if cache_path.is_file():
+        eprint(f"[INFO] Transcript chunk già presente, skip API: {cache_path.name}")
+        return load_json(cache_path)
+
+    payload = transcribe_file(
+        client=client,
+        path=path,
+        model=model,
+        language=language,
+        prompt=prompt,
+    )
+    save_json(cache_path, payload)
+    return payload
+
+
 def extract_segments(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     segments = payload.get("segments")
     if isinstance(segments, list) and segments:
@@ -286,6 +359,7 @@ def extract_segments(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def build_srt_entries(
     chunks: List[Tuple[Path, float]],
+    transcript_cache_dir: Path,
     client: Any,
     model: str,
     language: str,
@@ -294,9 +368,11 @@ def build_srt_entries(
     prompt_tail = ""
 
     for chunk_path, offset_sec in chunks:
-        payload = transcribe_file(
+        cache_path = transcript_cache_dir / f"{chunk_path.stem}.verbose.json"
+        payload = transcribe_file_cached(
             client=client,
             path=chunk_path,
+            cache_path=cache_path,
             model=model,
             language=language,
             prompt=prompt_tail,
@@ -367,23 +443,43 @@ def main() -> None:
     output_srt.parent.mkdir(parents=True, exist_ok=True)
     target_bytes = int(args.target_size_mb * 1024 * 1024)
 
-    with tempfile.TemporaryDirectory(prefix="slidescribe_whisper_", dir=str(output_srt.parent)) as tmp_dir:
-        tmp_path = Path(tmp_dir)
-        optimized_audio = tmp_path / f"{input_video.stem}.optimized.webm"
+    workspace_dir = output_srt.parent / "slidescribe_whisper" / output_srt.stem
+    manifest = build_workspace_manifest(input_video=input_video, output_srt=output_srt, args=args)
+    ensure_workspace(workspace_dir=workspace_dir, manifest=manifest)
 
+    optimized_audio = workspace_dir / f"{input_video.stem}.optimized.webm"
+    chunks_dir = workspace_dir / "chunks"
+    transcripts_dir = workspace_dir / "transcripts"
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+    transcripts_dir.mkdir(parents=True, exist_ok=True)
+
+    if optimized_audio.is_file() and optimized_audio.stat().st_size > 0:
+        eprint(f"[INFO] Audio ottimizzato già presente, skip encoding: {optimized_audio.name}")
+    else:
         eprint("[INFO] Estrazione e ottimizzazione audio per STT...")
         encode_optimized_audio(input_video=input_video, output_audio=optimized_audio, bitrate=args.audio_bitrate)
 
-        chunk_plan = build_chunk_plan(
-            optimized_audio,
-            target_bytes=target_bytes,
-            max_chunk_duration_sec=args.max_chunk_duration_sec,
-        )
-        eprint(f"[INFO] Chunk audio previsti: {len(chunk_plan)}")
+    chunk_plan = build_chunk_plan(
+        optimized_audio,
+        target_bytes=target_bytes,
+        max_chunk_duration_sec=args.max_chunk_duration_sec,
+    )
+    eprint(f"[INFO] Chunk audio previsti: {len(chunk_plan)}")
 
-        chunk_files: List[Tuple[Path, float]] = []
-        for idx, (start_sec, duration_sec) in enumerate(chunk_plan, start=1):
-            chunk_path = tmp_path / f"chunk_{idx:03d}.webm"
+    chunk_plan_payload = {
+        "chunk_plan": [
+            {"index": idx, "start_sec": start_sec, "duration_sec": duration_sec}
+            for idx, (start_sec, duration_sec) in enumerate(chunk_plan, start=1)
+        ]
+    }
+    save_json(workspace_dir / "chunk_plan.json", chunk_plan_payload)
+
+    chunk_files: List[Tuple[Path, float]] = []
+    for idx, (start_sec, duration_sec) in enumerate(chunk_plan, start=1):
+        chunk_path = chunks_dir / f"chunk_{idx:03d}.webm"
+        if chunk_path.is_file() and chunk_path.stat().st_size > 0 and chunk_path.stat().st_size <= target_bytes:
+            eprint(f"[INFO] Chunk audio già presente, skip encoding: {chunk_path.name}")
+        else:
             encode_chunk(
                 optimized_audio=optimized_audio,
                 chunk_path=chunk_path,
@@ -392,20 +488,21 @@ def main() -> None:
                 bitrate=args.audio_bitrate,
                 target_bytes=target_bytes,
             )
-            chunk_files.append((chunk_path, start_sec))
+        chunk_files.append((chunk_path, start_sec))
 
-        client = OpenAI()
-        entries = build_srt_entries(
-            chunks=chunk_files,
-            client=client,
-            model=args.model,
-            language=args.language,
-        )
+    client = OpenAI()
+    entries = build_srt_entries(
+        chunks=chunk_files,
+        transcript_cache_dir=transcripts_dir,
+        client=client,
+        model=args.model,
+        language=args.language,
+    )
 
-        if not entries:
-            die("Whisper non ha restituito segmenti utili per generare l'SRT")
+    if not entries:
+        die("Whisper non ha restituito segmenti utili per generare l'SRT")
 
-        write_srt(output_srt, entries)
+    write_srt(output_srt, entries)
 
     eprint(f"[OK] SRT generato: {output_srt}")
 
