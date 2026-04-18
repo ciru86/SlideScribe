@@ -301,12 +301,23 @@ derive_workdir_from_youtube_url() {
     candidate="youtube-video"
   fi
 
-  sanitized="$(printf '%s' "$candidate" | tr -cs '[:alnum:]._-' '_')"
+  sanitized="$(sanitize_filesystem_name "$candidate" "youtube-video")"
+
+  printf '%s' "$sanitized"
+}
+
+sanitize_filesystem_name() {
+  # Rende una stringa adatta a essere usata come nome file/cartella.
+  local value="$1"
+  local fallback="${2:-youtube-video}"
+  local sanitized=""
+
+  sanitized="$(printf '%s' "$value" | tr -cs '[:alnum:]._-' '_')"
   sanitized="${sanitized##_}"
   sanitized="${sanitized%%_}"
 
   if [ -z "$sanitized" ]; then
-    sanitized="youtube-video"
+    sanitized="$fallback"
   fi
 
   printf '%s' "$sanitized"
@@ -1334,7 +1345,9 @@ resolve_inputs() {
       if [ -n "$INPUT_MKV" ]; then
         VIDEO_BASENAME="$(basename "$INPUT_MKV" .mkv)"
       elif [ -n "$YOUTUBE_URL" ]; then
-        VIDEO_BASENAME="$(derive_workdir_from_youtube_url "$YOUTUBE_URL")"
+        if ! VIDEO_BASENAME="$(derive_video_basename_from_youtube_title "$YOUTUBE_URL")"; then
+          VIDEO_BASENAME="$(derive_workdir_from_youtube_url "$YOUTUBE_URL")"
+        fi
       else
         VIDEO_BASENAME="$(basename "$WORKDIR")"
       fi
@@ -1508,6 +1521,34 @@ validate_youtube_url() {
 
   run_ytdlp_with_policy "$validation_log" "validazione URL" --simulate --skip-download -- "$url" >/dev/null
   rm -f "$validation_log"
+}
+
+derive_video_basename_from_youtube_title() {
+  # Prova a derivare il basename dal titolo reale del video YouTube.
+  local url="$1"
+  local metadata_log="${TMPDIR:-/tmp}/slidescribe_ytdlp_title.$$.stderr.log"
+  local raw_title=""
+  local sanitized=""
+  local rc=0
+
+  set +e
+  raw_title="$(run_ytdlp_with_policy "$metadata_log" "lettura titolo video" --print title --skip-download -- "$url" | head -n 1)"
+  rc=$?
+  set -e
+
+  rm -f "$metadata_log"
+
+  if [ "$rc" -ne 0 ]; then
+    return 1
+  fi
+
+  raw_title="$(trim "$raw_title")"
+  [ -n "$raw_title" ] || return 1
+
+  sanitized="$(sanitize_filesystem_name "$raw_title" "youtube-video")"
+  [ -n "$sanitized" ] || return 1
+
+  printf '%s' "$sanitized"
 }
 
 run_chatgpt_upload() {
