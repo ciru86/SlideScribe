@@ -1,35 +1,30 @@
-cat > .gitignore <<'EOF'
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
 
-# Virtualenv
+# Virtual environments
 .venv/
 venv/
+env/
 
 # macOS
 .DS_Store
 
-# Output progetto
+# Local output
+output/
+tmp/
 logs/
 llm_chunks/
 llm_corrected/
 llm_merged/
+
+# Generated media/documents
 *.pdf
 *.docx
 *.mkv
 *.srt
 
-# Slide output
-* slides/
-
 # Editor
 .vscode/
 .idea/
-EOF
-
-output/
-tmp/
-logs/
